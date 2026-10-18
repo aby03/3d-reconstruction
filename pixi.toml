@@ -1,0 +1,13 @@
+[workspace]
+channels = ["conda-forge"]
+name = "3d-reconstruction"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+download-data = "python download_data.py"
+dev = "python test.py"
+
+[dependencies]
+python = "3.11.*"
+huggingface_hub = ">=2.2.0,<3"
