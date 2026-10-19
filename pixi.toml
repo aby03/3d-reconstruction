@@ -16,7 +16,8 @@ matplotlib = ">=3.11.2,<4"
 [tasks]
 download-data = "python src/download_data.py"
 dev = "python src/dev.py"
-1a_projection = "python src/1_projection/a_projection.py"
+1a_projection = "python src/tutorials/1_multi_view_geometry/a_projection.py"
+1b_epipolar = "python src/tutorials/1_multi_view_geometry/b_epipolar.py"
 
 [activation.env]
 PYTHONPATH = "${PIXI_WORKSPACE_ROOT}"

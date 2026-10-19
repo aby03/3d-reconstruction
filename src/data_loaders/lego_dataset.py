@@ -29,7 +29,7 @@ class LegoDataset(Dataset):
             if file_count >= files_to_load:
                 break
             img_relative_path = frame["file_path"]
-            _, img_tensor = self.load_image(self.data_dir / img_relative_path, image_size=image_size)
+            _, img_tensor = self.load_image(self.data_dir / img_relative_path)
 
             self.image_tensors.append(img_tensor)
             self.poses.append(torch.tensor(frame["transform_matrix"], dtype=torch.float32))
@@ -42,7 +42,7 @@ class LegoDataset(Dataset):
     def __getitem__(self, idx):
         return self.image_tensors[idx], self.poses[idx]
 
-    def load_image(self, img_path: Path | str, image_size=400):
+    def load_image(self, img_path: Path | str):
         # Load Image
         img_path = str(img_path)
         if not img_path.endswith(".png"):
@@ -50,7 +50,7 @@ class LegoDataset(Dataset):
         image = Image.open(img_path).convert("RGBA")
 
         # Downscale for faster run on laptop (original 800)
-        image = image.resize((image_size, image_size), Image.Resampling.LANCZOS)
+        image = image.resize((self.image_size, self.image_size), Image.Resampling.LANCZOS)
 
         # Convert to tensor with range [0, 1]
         img_tensor = torch.tensor(np.array(image), dtype=torch.float32) / 255.0

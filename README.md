@@ -12,3 +12,16 @@ wget -qO- https://pixi.sh/install.sh | sh
 ```
 pixi run download-data
 ```
+
+## Running code
+
+### 1a. projection
+Project 3d world coordinates to image plane given intrinsics and extrinsics
+```
+pixi run 1a_projection
+```
+### 1b. Epipolar Geometry
+Covers Essential Matrix, Fundamental Matrix and Epipolar line computation given 2 views sharing world coordinates frame.
+```
+pixi run 1b_epipolar
+```
