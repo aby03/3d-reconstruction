@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 from src.data_loaders.lego_dataset import LegoDataset
 
@@ -99,5 +100,11 @@ if abs(l2[1]) > 1e-5:
     axes[1].plot(u_vals, v_vals, color='yellow', linewidth=2, label='Epipolar line')
 axes[1].set_title("View 2")
 axes[1].legend()
+
+output_dir = Path(__file__).resolve().parents[3] / "outputs"
+output_dir.mkdir(parents=True, exist_ok=True)
+output_path = output_dir / "tutorial_1b_epipolar.png"
+fig.savefig(output_path, dpi=160, bbox_inches="tight")
+print(f"Visualization saved to: {output_path}")
 
 plt.show()

@@ -52,7 +52,7 @@ v = pixel_homogeneous[1] / pixel_homogeneous[2]
 print(f"Projected Pixel Coordinates: u = {u:.2f}, v = {v:.2f}")
 
 # 6. Visualize using Matplotlib
-plt.figure(figsize=(6, 6))
+fig = plt.figure(figsize=(6, 6))
 plt.imshow(img_rgb)
 # Plot the projected 3D point as a red dot
 plt.scatter([u], [v], color='red', s=100, marker='o', label='Projected 3D Point (0,0,0)')
@@ -61,4 +61,9 @@ plt.ylim(image_size, 0)  # Flip y-axis to match image coordinate standards
 plt.legend()
 plt.title("3D Point Projection Visualization")
 plt.axis('off')
+output_dir = Path(__file__).resolve().parents[3] / "outputs"
+output_dir.mkdir(parents=True, exist_ok=True)
+output_path = output_dir / "tutorial_1a_projection.png"
+fig.savefig(output_path, dpi=160, bbox_inches="tight")
+print(f"Visualization saved to: {output_path}")
 plt.show()

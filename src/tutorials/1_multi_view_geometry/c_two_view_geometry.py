@@ -1,6 +1,7 @@
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+from pathlib import Path
 
 from src.data_loaders.lego_dataset import LegoDataset
 from src.feature_matching.sift_matcher import SIFTMatcher
@@ -128,6 +129,14 @@ axis_3d.set_zlabel("Z (camera 1 frame)")
 axis_3d.set_title(f"Triangulated points: {len(points_3d)} (scale is arbitrary)")
 axis_3d.legend()
 fig_3d.colorbar(scatter, ax=axis_3d, label="Depth in camera 1 frame")
+
+output_dir = Path(__file__).resolve().parents[3] / "outputs"
+output_dir.mkdir(parents=True, exist_ok=True)
+matches_path = output_dir / "tutorial_1c_matches.png"
+point_cloud_path = output_dir / "tutorial_1c_point_cloud.png"
+fig.savefig(matches_path, dpi=160, bbox_inches="tight")
+fig_3d.savefig(point_cloud_path, dpi=160, bbox_inches="tight")
+
 print(f"SIFT matches: {len(good_matches)}")
 print(f"Essential-matrix inliers: {np.count_nonzero(ransac_mask)}")
 print(f"Pose inliers: {np.count_nonzero(pose_inliers)}")
@@ -136,5 +145,7 @@ print("Relative rotation (camera 1 to camera 2):")
 print(rotation)
 print("Relative translation direction (scale is unknown):")
 print(translation.ravel())
+print(f"Matches visualization saved to: {matches_path}")
+print(f"Point-cloud visualization saved to: {point_cloud_path}")
 
 plt.show()
