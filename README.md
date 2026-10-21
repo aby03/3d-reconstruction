@@ -25,3 +25,8 @@ Covers Essential Matrix, Fundamental Matrix and Epipolar line computation given 
 ```
 pixi run 1b_epipolar
 ```
+### 1c. Multi-view Geometry
+Using 2 images, compute matching points, essential matrix, relative pose, camera positions and matching points projection in 3D.
+```
+pixi run 1c_two_view_geometry
+```

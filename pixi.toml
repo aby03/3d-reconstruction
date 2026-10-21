@@ -12,12 +12,14 @@ pytorch = ">=2.14.1,<3"
 torchvision = ">=0.29.1,<0.30"
 pytorch-cuda = "12.4.*"
 matplotlib = ">=3.11.2,<4"
+opencv = ">=5.0.0,<6"
 
 [tasks]
 download-data = "python src/download_data.py"
 dev = "python src/dev.py"
 1a_projection = "python src/tutorials/1_multi_view_geometry/a_projection.py"
 1b_epipolar = "python src/tutorials/1_multi_view_geometry/b_epipolar.py"
+1c_two_view_geometry = "python src/tutorials/1_multi_view_geometry/c_two_view_geometry.py"
 
 [activation.env]
 PYTHONPATH = "${PIXI_WORKSPACE_ROOT}"
