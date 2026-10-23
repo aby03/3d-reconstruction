@@ -40,3 +40,13 @@ pixi run 1c_two_view_geometry
 ![Two-view feature matches](results/tutorial_1c_matches.png)
 
 ![Triangulated 3D point cloud](results/tutorial_1c_point_cloud.png)
+
+### 3. Room Reconstruction
+Compare two room reconstruction pipelines. The `3a` baseline uses COLMAP for sparse-to-dense reconstruction. The `3b` pipeline samples the `room2` MP4 with OpenCV, estimates camera poses with COLMAP, and uses OpenMVS for dense reconstruction and image texturing.
+
+```bash
+pixi run 3a_reconstruction
+pixi run 3b_reconstruction
+```
+
+The `3b` pipeline defaults to `data/room2` and writes timestamped runs under `outputs/room2_reconstruction/`. OpenMVS command-line tools must be installed separately and available on `PATH`. See the [reconstruction guide](src/tutorials/3_reconstruction/README.md) for details.

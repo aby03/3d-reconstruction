@@ -1,24 +1,47 @@
 # Room Reconstruction
 
-Run a COLMAP sparse-to-dense reconstruction from the Open Camera Sensors capture. The input defaults to `data/room`; the runner finds its single directory of timestamped images automatically.
+## 3a: COLMAP baseline
+
+The original COLMAP sparse-to-dense pipeline is preserved in `3a_run.py` and writes runs under `outputs/room_reconstruction/`.
 
 ```bash
-pixi run 3_reconstruction
+pixi run 3a_reconstruction
+pixi run 3a_reconstruction -- --quality extreme
+pixi run 3a_reconstruction -- --image-dir data/room/20261021_171938
 ```
 
-The default pipeline uses timestamp-ordered frames, exhaustive pair matching, SIFT features, an incremental mapper, high-quality dense depth, Delaunay meshing, and one shared `SIMPLE_RADIAL` camera model. Since the capture currently has no camera-intrinsics sidecar or EXIF calibration, COLMAP estimates the shared intrinsics. The accelerometer, gyroscope, and magnetometer CSVs are recorded in the run manifest but are not fused into camera poses yet; correct sensor timestamp alignment, axis convention, and camera-to-IMU calibration are prerequisites for that.
+COLMAP estimates shared camera intrinsics when no calibration is provided. IMU CSV files are recorded but not fused into poses.
 
-Each run gets a new directory under `outputs/room_reconstruction/` containing the COLMAP database, sparse model, dense workspace/depth maps, fused PLY, Delaunay mesh PLY, GLB point cloud, GLB mesh, log, manifest, and summary. Use `fused_point_cloud.glb` to inspect dense samples or `dense_mesh.glb` to inspect the triangulated surface.
+## 3b: OpenCV, COLMAP, and OpenMVS
 
-Options:
+The new pipeline defaults to the MP4 in `data/room2`. OpenCV samples it at 2 frames per second, measures each sampled frame's sharpness using variance of the Laplacian, and stages selected images into a clean image-only directory. All sampled frames are kept by default. COLMAP uses sequential matching for the ordered video frames and estimates camera poses. Before import, COLMAP undistorts registered images and exports PINHOLE cameras, which OpenMVS requires. OpenMVS then densifies the scene, reconstructs and refines a mesh, and projects image textures onto it. The provided extracted JPEGs remain available as an image-only alternative.
+
+OpenCV is provided by Pixi. OpenMVS is not available in the configured conda-forge channel; install its CLI tools from the [official OpenMVS releases](https://github.com/cdcseacave/openMVS/releases/latest) and make `InterfaceCOLMAP`, `DensifyPointCloud`, `ReconstructMesh`, `RefineMesh`, and `TextureMesh` available on `PATH`.
 
 ```bash
-pixi run 3_reconstruction -- --quality high
-pixi run 3_reconstruction -- --quality extreme
-pixi run 3_reconstruction -- --image-dir data/room/20261021_171938 --output-dir outputs/room_reconstruction/test-run
-pixi run 3_reconstruction -- --data-type video
-pixi run 3_reconstruction -- --camera-model PINHOLE --camera-params fx,fy,cx,cy
-pixi run 3_reconstruction -- --cpu
+pixi run 3b_reconstruction
+pixi run 3b_reconstruction -- --resolution-level 0
+pixi run 3b_reconstruction -- --min-sharpness 30
+pixi run 3b_reconstruction -- --image-dir data/room2/20261021_211400
+pixi run 3b_reconstruction -- --images-only
+pixi run 3b_reconstruction -- --sample-fps 1
 ```
 
-The Delaunay mesh is a surface estimate, not guaranteed to be watertight. Check the run summary and COLMAP log for registered-image count and reconstruction quality; self-calibration can fail on blurry, low-texture, or low-parallax captures. Increase to `--quality extreme` for a denser but more expensive run.
+OpenMVS resolution level `0` uses full resolution, `1` half resolution, and `2` quarter resolution; full resolution can require substantially more memory. The final GLB embeds its texture and is packaged as a self-contained file. The OBJ uses its adjacent MTL and JPG texture sidecar. Runs go under `outputs/room2_reconstruction/` with the following layout:
+
+```text
+<run>/
+	images/                 sampled input frames
+	sparse/                 COLMAP sparse camera model
+	openmvs/
+		scene_textured.obj    textured mesh
+		scene_textured.mtl    OBJ material
+		scene_textured_material_00_map_Kd.jpg
+		scene_textured.glb   self-contained textured mesh
+		intermediate/         OpenMVS scenes, depth maps, meshes, logs, undistorted images
+	reconstruction.log
+	run_manifest.json
+	summary.json
+```
+
+IMU streams are preserved but not fused; doing so requires verified time alignment, sensor axes, and camera-to-IMU calibration.
