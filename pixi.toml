@@ -8,12 +8,18 @@ version = "0.1.0"
 python = "3.12.*"
 huggingface_hub = ">=2.2.0,<3"
 numpy = ">=2.4.6,<3"
+scipy = ">=1.18,<2"
 pytorch = { version = "==2.9.1", build = "*cuda129*" }
 pycolmap = { version = "==4.2.0", build = "*cuda*129*" }
-onnxruntime-cpp = "==1.28.0"
+onnxruntime = { version = "==1.28.0", build = "*cuda129*" }
+onnxruntime-cpp = { version = "==1.28.0", build = "*cuda129*" }
 cuda-version = ">=12.9,<13"
 matplotlib = ">=3.11.2,<4"
 opencv = ">=5.0.0,<6"
+open3d = ">=0.20.0,<0.21"
+pandas = ">=3.0.1,<4"
+pyyaml = ">=6.0.3,<7"
+tqdm = ">=4.70,<5"
 trimesh = ">=5,<6"
 
 [tasks]
@@ -27,3 +33,56 @@ dev = "python src/dev.py"
 
 [activation.env]
 PYTHONPATH = "${PIXI_WORKSPACE_ROOT}"
+PATH = "${PIXI_WORKSPACE_ROOT}/.local/openmvs/bin/OpenMVS:${PATH}"
+
+# --- OpenMVS (CUDA) build: `pixi run -e build openmvs` -----------------------
+# Sources: third_party/openMVS and third_party/vcglib (both git submodules; VCG
+# is not on conda-forge). Installs to .local/openmvs.
+[feature.build.dependencies]
+cmake = "*"
+ninja = "*"
+pkg-config = "*"
+cxx-compiler = "*"
+gxx_linux-64 = "14.*"             # nvcc 12.9 supports GCC <= 14
+cuda-version = "12.9.*"
+cuda-nvcc = "12.9.*"
+cuda-cudart-dev = "12.9.*"
+cuda-driver-dev = "12.9.*"
+libcublas-dev = "12.9.*"
+libcurand-dev = "10.3.*"             # cuRAND ships with CUDA 12.9 as 10.3.x
+libopencv = "4.*"                 # OpenMVS targets OpenCV 4; default env has 5
+eigen = "*"
+libboost-devel = "1.88.*"           # >=1.89 dropped the boost_system stub OpenMVS requires
+cgal-cpp = "*"
+nanoflann = "*"
+zlib = "*"
+libpng = "*"
+libjpeg-turbo = "*"
+libtiff = "*"
+
+[feature.build.activation.env]
+VCG_ROOT = "${PIXI_WORKSPACE_ROOT}/third_party/vcglib"
+PATH = "${PIXI_WORKSPACE_ROOT}/.local/openmvs/bin/OpenMVS:${PATH}"
+
+[feature.build.tasks]
+openmvs-configure = """cmake -S third_party/openMVS -B build/openmvs -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=$PIXI_WORKSPACE_ROOT/.local/openmvs \
+  -DCMAKE_INSTALL_RPATH=$CONDA_PREFIX/lib \
+  -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+  -DCMAKE_PREFIX_PATH=$CONDA_PREFIX \
+  -DOpenMVS_USE_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=75 \
+  -DCMAKE_CUDA_COMPILER=$CONDA_PREFIX/bin/nvcc \
+  -DCMAKE_CUDA_HOST_COMPILER=$CXX \
+  -DCUDAToolkit_ROOT=$CONDA_PREFIX \
+  -DOpenMVS_BUILD_VIEWER=OFF \
+  -DOpenMVS_USE_PYTHON=OFF \
+  -DOpenMVS_USE_BREAKPAD=OFF \
+  -DOpenMVS_ENABLE_TESTS=OFF"""
+openmvs-build = "cmake --build build/openmvs --parallel"
+openmvs-install = "cmake --install build/openmvs"
+openmvs = { depends-on = ["openmvs-configure", "openmvs-build", "openmvs-install"] }
+
+[environments]
+build = { features = ["build"], no-default-feature = true }

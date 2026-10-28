@@ -16,7 +16,7 @@ COLMAP estimates shared camera intrinsics when no calibration is provided. IMU C
 
 The new pipeline defaults to the MP4 in `data/room2`. OpenCV samples it at 2 frames per second, measures each sampled frame's sharpness using variance of the Laplacian, and stages selected images into a clean image-only directory. All sampled frames are kept by default. COLMAP uses sequential matching for the ordered video frames and estimates camera poses. Before import, COLMAP undistorts registered images and exports PINHOLE cameras, which OpenMVS requires. OpenMVS then densifies the scene, reconstructs and refines a mesh, and projects image textures onto it. The provided extracted JPEGs remain available as an image-only alternative.
 
-OpenCV is provided by Pixi. OpenMVS is not available in the configured conda-forge channel; install its CLI tools from the [official OpenMVS releases](https://github.com/cdcseacave/openMVS/releases/latest) and make `InterfaceCOLMAP`, `DensifyPointCloud`, `ReconstructMesh`, `RefineMesh`, and `TextureMesh` available on `PATH`.
+OpenCV is provided by Pixi. OpenMVS is not available on conda-forge, so it is built from source with CUDA: run `pixi run -e build openmvs` (see the [OpenMVS CUDA build](../../../plans/architecture/openmvs_cuda_build.md) doc). The tools (`InterfaceCOLMAP`, `DensifyPointCloud`, `ReconstructMesh`, `RefineMesh`, `TextureMesh`) are added to `PATH` automatically.
 
 ```bash
 pixi run 3b_reconstruction

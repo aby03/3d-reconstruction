@@ -7,4 +7,11 @@
 
 data/
 outputs/
+plans/
 PLAN.md
+
+# OpenMVS build artifacts and scratch/log output
+/build/
+/.local/
+/tmp/
+*.log

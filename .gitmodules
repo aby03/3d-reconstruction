@@ -1,0 +1,6 @@
+[submodule "third_party/openMVS"]
+	path = third_party/openMVS
+	url = https://github.com/cdcseacave/openMVS.git
+[submodule "third_party/vcglib"]
+	path = third_party/vcglib
+	url = https://github.com/cdcseacave/VCG.git
