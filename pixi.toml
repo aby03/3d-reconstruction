@@ -21,10 +21,15 @@ pandas = ">=3.0.1,<4"
 pyyaml = ">=6.0.3,<7"
 tqdm = ">=4.70,<5"
 trimesh = ">=5,<6"
+pytest = ">=9,<10"
+
+[pypi-dependencies]
+recon = { path = ".", editable = true }
 
 [tasks]
 download-data = "python src/download_data.py"
 dev = "python src/dev.py"
+test = "pytest"
 1a_projection = "python src/tutorials/1_multi_view_geometry/a_projection.py"
 1b_epipolar = "python src/tutorials/1_multi_view_geometry/b_epipolar.py"
 1c_two_view_geometry = "python src/tutorials/1_multi_view_geometry/c_two_view_geometry.py"
