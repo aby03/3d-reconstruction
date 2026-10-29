@@ -1,11 +1,14 @@
 """Sample sensor streams at frame timestamps."""
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 
 from recon.core.types import CaptureSequence, FrameSensorData, SensorKind, SensorStream
+from recon.sensors.gravity import gravity_complementary, gravity_confidence, gravity_lowpass
+from recon.sensors.gyro import frame_rotations
 
 PREFIX = {SensorKind.ACCEL: "accel", SensorKind.GYRO: "gyro", SensorKind.MAG: "mag"}
 AXES = ("x", "y", "z")
@@ -15,7 +18,19 @@ def sensor_columns(kind: SensorKind) -> list[str]:
     return [f"{PREFIX[kind]}_{a}" for a in AXES] + [f"{PREFIX[kind]}_dt_ms"]
 
 
-COLUMNS = ["idx", "t_ns", "t_s", "valid", *(c for kind in SensorKind for c in sensor_columns(kind)), "omega_norm"]
+GRAV_DEV_COLUMNS = [f"grav_dev_{a}" for a in AXES]
+GRAV_CAM_COLUMNS = [f"grav_cam_{a}" for a in AXES]
+COLUMNS = [
+    "idx",
+    "t_ns",
+    "t_s",
+    "valid",
+    *(c for kind in SensorKind for c in sensor_columns(kind)),
+    *GRAV_DEV_COLUMNS,
+    *GRAV_CAM_COLUMNS,
+    "grav_conf",
+    "omega_norm",
+]
 
 
 @dataclass(slots=True)
@@ -25,6 +40,8 @@ class SyncOptions:
         default_factory=lambda: {SensorKind.ACCEL: 20.0, SensorKind.GYRO: 20.0, SensorKind.MAG: 50.0}
     )
     required: tuple[SensorKind, ...] = (SensorKind.ACCEL, SensorKind.GYRO)
+    gravity_method: Literal["complementary", "lowpass"] = "complementary"
+    gravity_bidirectional: bool = True
 
 
 def interpolate_stream(
@@ -61,7 +78,10 @@ def interpolate_stream(
 def synchronize(
     sequence: CaptureSequence, opts: SyncOptions | None = None, camera_id: str = "cam0"
 ) -> FrameSensorData:
-    """One row per frame: each sensor interpolated at the frame time, validity, and ‖ω‖."""
+    """One row per frame: each sensor interpolated at the frame time, validity, gravity and ‖ω‖.
+
+    Also integrates the gyro between consecutive frames into `dR_prev`.
+    """
     opts = opts or SyncOptions()
     t_frame_ns = sequence.cameras[camera_id].frame_t_ns
     t_query_ns = t_frame_ns + opts.camera_time_offset_ns
@@ -92,5 +112,32 @@ def synchronize(
             df["valid"] &= valid
 
     df["omega_norm"] = np.linalg.norm(df[sensor_columns(SensorKind.GYRO)[:3]].to_numpy(), axis=1)
+    accel_norm = np.linalg.norm(df[sensor_columns(SensorKind.ACCEL)[:3]].to_numpy(), axis=1)
+    df["grav_conf"] = gravity_confidence(accel_norm, df["omega_norm"].to_numpy())
+
+    accel, gyro = sequence.sensors.get(SensorKind.ACCEL), sequence.sensors.get(SensorKind.GYRO)
+    grav_dev = np.full((n, 3), np.nan)
+    if accel is None or (gyro is None and opts.gravity_method == "complementary"):
+        report["warnings"].append(f"{opts.gravity_method} gravity needs the missing accel/gyro streams")
+    elif opts.gravity_method == "complementary":
+        grav_dev = gravity_complementary(accel, gyro, t_query_ns, bidirectional=opts.gravity_bidirectional)
+    else:
+        grav_dev = gravity_lowpass(accel, t_query_ns)
+    df[GRAV_DEV_COLUMNS] = grav_dev
+
+    extrinsics = sequence.extrinsics.get(camera_id)
+    if extrinsics is None:
+        report["warnings"].append(f"no camera-IMU extrinsics for {camera_id}, grav_cam is NaN")
+        df[GRAV_CAM_COLUMNS] = np.nan
+    else:
+        df[GRAV_CAM_COLUMNS] = grav_dev @ extrinsics.R_cam_imu.T
+
     report["frames_valid_ratio"] = float(df["valid"].mean()) if n else 0.0
-    return FrameSensorData(frames=df[COLUMNS], report=report)
+    report["gravity"] = {
+        "method": opts.gravity_method,
+        "bidirectional": opts.gravity_bidirectional,
+        "grav_cam_mean": np.nanmean(df[GRAV_CAM_COLUMNS].to_numpy(), axis=0).tolist() if n else None,
+        "grav_conf_median": float(np.nanmedian(df["grav_conf"])) if n else None,
+    }
+    dR_prev = None if gyro is None else frame_rotations(gyro, t_query_ns)
+    return FrameSensorData(frames=df[COLUMNS], report=report, dR_prev=dR_prev)

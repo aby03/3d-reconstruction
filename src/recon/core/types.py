@@ -48,6 +48,17 @@ class VideoStream:
 
 
 @dataclass(slots=True)
+class CameraSensorExtrinsics:
+    """How one camera sits relative to the IMU (device) frame."""
+
+    camera_id: str
+    R_cam_imu: np.ndarray  # (3, 3) camera (OpenCV, upright image) <- device
+    t_cam_imu: np.ndarray  # (3,) metres, zeros if unknown
+    time_offset_ns: int  # t_imu = t_frame + time_offset_ns
+    source: str  # "nominal" | "calibrated"
+
+
+@dataclass(slots=True)
 class CaptureSequence:
     """Everything a loader knows about one recording, without decoded pixels."""
 
@@ -59,6 +70,7 @@ class CaptureSequence:
     reference_images: dict[int, Path] = field(default_factory=dict)  # frame idx -> jpg
     metadata: dict[str, Any] = field(default_factory=dict)
     checks: dict[str, Any] = field(default_factory=dict)
+    extrinsics: dict[str, CameraSensorExtrinsics] = field(default_factory=dict)  # per camera
 
 
 @dataclass(slots=True)
@@ -75,3 +87,4 @@ class FrameSensorData:
 
     frames: pd.DataFrame  # one row per frame, columns in recon.sensors.sync.COLUMNS
     report: dict[str, Any] = field(default_factory=dict)
+    dR_prev: np.ndarray | None = None  # (N, 4) xyzw, device frame: rotation of frame i relative to i-1, identity at 0

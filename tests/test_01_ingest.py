@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from recon.capture.open_camera_sensors import (
     LoaderOptions,
@@ -7,9 +8,11 @@ from recon.capture.open_camera_sensors import (
     discover_files,
     read_sensor_csv,
 )
+from recon.core.frames import DEVICE_ORIENTATIONS, R_cam_imu_upright, device_orientation_from_gravity
 from recon.core.types import SensorKind
-from recon.sensors.sync import COLUMNS, SyncOptions, synchronize
+from recon.sensors.gyro import integrate_rotation
 from recon.sensors.streams import clean_stream, stream_stats
+from recon.sensors.sync import COLUMNS, SyncOptions, synchronize
 
 EXPECTED_RATE_HZ = {SensorKind.ACCEL: 457.0, SensorKind.GYRO: 457.0, SensorKind.MAG: 100.0}
 
@@ -105,3 +108,32 @@ def test_synchronize(sequence):
     assert df["accel_dt_ms"].max() < 3 and df["gyro_dt_ms"].max() < 3
     assert df[["mag_x", "mag_y", "mag_z"]].notna().all().all()
     assert sync.report["frames_valid_ratio"] == 1.0
+
+
+def test_nominal_R_cam_imu():
+    # back camera, portrait: image x/y/z = device x/-y/-z
+    assert np.array_equal(R_cam_imu_upright(0), np.diag([1.0, -1.0, -1.0]))
+    for o in DEVICE_ORIENTATIONS:
+        assert device_orientation_from_gravity(R_cam_imu_upright(o).T @ [0.0, 1.0, 0.0]) == o
+
+
+def test_gravity_and_gyro_rotations(sequence):
+    assert sequence.checks["device_orientation"] == {"deg": 0, "from_display": 0, "from_gravity": 0}
+    ext = sequence.extrinsics["cam0"]
+    assert ext.source == "nominal" and np.array_equal(ext.R_cam_imu, R_cam_imu_upright(0))
+
+    sync = synchronize(sequence, SyncOptions())
+    df = sync.frames
+    grav_cam = df[["grav_cam_x", "grav_cam_y", "grav_cam_z"]].to_numpy()
+    assert np.allclose(np.linalg.norm(grav_cam, axis=1), 1.0)
+    assert grav_cam.mean(axis=0)[1] > 0.95
+    assert df["grav_conf"].median() > 0.5
+
+    t = sequence.cameras["cam0"].frame_t_ns
+    dR = sync.dR_prev
+    assert dR.shape == (300, 4) and np.allclose(dR[0], [0, 0, 0, 1])
+    chained = Rotation.identity()
+    for q in dR[1:]:
+        chained = chained * Rotation.from_quat(q)
+    whole = Rotation.from_matrix(integrate_rotation(sequence.sensors[SensorKind.GYRO], t[0], t[-1]))
+    assert (chained.inv() * whole).magnitude() < 1e-6

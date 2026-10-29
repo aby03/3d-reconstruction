@@ -19,7 +19,13 @@ import pandas as pd
 from recon.capture.base import BaseCaptureLoader
 from recon.capture.reference import check_reference_images
 from recon.capture.timing import check_frame_timing
-from recon.core.types import CaptureSequence, Frame, SensorKind, SensorStream, VideoStream
+from recon.core.frames import (
+    ANDROID_DEVICE,
+    R_cam_imu_upright,
+    device_orientation_from_display,
+    device_orientation_from_gravity,
+)
+from recon.core.types import CameraSensorExtrinsics, CaptureSequence, Frame, SensorKind, SensorStream, VideoStream
 from recon.io.video import VideoReader, probe_video
 from recon.sensors.streams import clean_stream, stream_stats
 
@@ -28,7 +34,6 @@ log = logging.getLogger(__name__)
 VIDEO_RE = re.compile(r"VID_(?P<stamp>\d{8}_\d{6})\.mp4")
 REFERENCE_RE = re.compile(r"(?P<t_ns>\d+)\.jpg")
 
-DEVICE_FRAME = "android_device"
 SENSOR_UNITS = {SensorKind.ACCEL: "m/s^2", SensorKind.GYRO: "rad/s", SensorKind.MAG: "uT"}
 SOURCE_TYPE = "open_camera_sensors"
 MIN_REFERENCE_PSNR_DB = 25.0
@@ -121,7 +126,7 @@ def read_sensor_csv(path: Path | str, kind: SensorKind) -> SensorStream:
         raise ValueError(f"{path}: non-finite sensor values")
     t_ns = df.iloc[:, 3].astype(np.int64).to_numpy()
     return SensorStream(
-        kind=kind, t_ns=t_ns, values=values, units=SENSOR_UNITS[kind], frame=DEVICE_FRAME, source_file=path
+        kind=kind, t_ns=t_ns, values=values, units=SENSOR_UNITS[kind], frame=ANDROID_DEVICE, source_file=path
     )
 
 
@@ -186,6 +191,15 @@ class OpenCameraSensorsLoader(BaseCaptureLoader):
                 checks["warnings"].append(f"reference image {jpg.name} matches no frame timestamp")
                 log.warning(checks["warnings"][-1])
 
+        orientation = self._device_orientation(rotation_deg, sensors.get(SensorKind.ACCEL), checks)
+        extrinsics = CameraSensorExtrinsics(
+            camera_id=camera.camera_id,
+            R_cam_imu=R_cam_imu_upright(orientation),
+            t_cam_imu=np.zeros(3),
+            time_offset_ns=0,
+            source="nominal",
+        )
+
         self.sequence = CaptureSequence(
             sequence_id=f"{files.root.name}_{files.stamp}",
             source_type=SOURCE_TYPE,
@@ -194,10 +208,26 @@ class OpenCameraSensorsLoader(BaseCaptureLoader):
             sensors=sensors,
             reference_images=reference_images,
             checks=checks,
+            extrinsics={camera.camera_id: extrinsics},
         )
         if self.options.verify_reference_jpegs and reference_images:
             self._verify_reference_images()
         return self.sequence
+
+    @staticmethod
+    def _device_orientation(rotation_deg: int, accel: SensorStream | None, checks: dict) -> int:
+        """Orientation from the display rotation, cross-checked against the mean accelerometer direction."""
+        from_display = device_orientation_from_display(rotation_deg)
+        from_gravity = None
+        if accel is not None and len(accel.t_ns):
+            from_gravity = device_orientation_from_gravity(-accel.values.mean(axis=0))
+        checks["device_orientation"] = {"deg": from_display, "from_display": from_display, "from_gravity": from_gravity}
+        if from_gravity is not None and from_gravity != from_display:
+            checks["warnings"].append(
+                f"device orientation from gravity ({from_gravity}) differs from the display rotation ({from_display})"
+            )
+            log.warning(checks["warnings"][-1])
+        return from_display
 
     def _verify_reference_images(self) -> None:
         checks = self.sequence.checks
