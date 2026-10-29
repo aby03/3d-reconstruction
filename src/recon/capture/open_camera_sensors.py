@@ -9,15 +9,18 @@ Layout:
 
 import logging
 import re
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from recon.capture.base import BaseCaptureLoader
+from recon.capture.reference import check_reference_images
 from recon.capture.timing import check_frame_timing
-from recon.core.types import CaptureSequence, SensorKind, SensorStream, VideoStream
-from recon.io.video import probe_video
+from recon.core.types import CaptureSequence, Frame, SensorKind, SensorStream, VideoStream
+from recon.io.video import VideoReader, probe_video
 from recon.sensors.streams import clean_stream, stream_stats
 
 log = logging.getLogger(__name__)
@@ -28,11 +31,14 @@ REFERENCE_RE = re.compile(r"(?P<t_ns>\d+)\.jpg")
 DEVICE_FRAME = "android_device"
 SENSOR_UNITS = {SensorKind.ACCEL: "m/s^2", SensorKind.GYRO: "rad/s", SensorKind.MAG: "uT"}
 SOURCE_TYPE = "open_camera_sensors"
+MIN_REFERENCE_PSNR_DB = 25.0
 
 
 @dataclass(slots=True)
 class LoaderOptions:
     allow_mismatch: bool = False  # truncate video frames and timestamps to the shorter instead of failing
+    verify_reference_jpegs: bool = True  # compare decoded frames with the saved JPEGs on load
+    max_reference_checks: int | None = None  # None checks every reference JPEG
 
 
 @dataclass(slots=True)
@@ -119,10 +125,21 @@ def read_sensor_csv(path: Path | str, kind: SensorKind) -> SensorStream:
     )
 
 
-class OpenCameraSensorsLoader:
+class OpenCameraSensorsLoader(BaseCaptureLoader):
+    name = SOURCE_TYPE
+
     def __init__(self, root: Path | str, options: LoaderOptions | None = None):
         self.root = Path(root)
         self.options = options or LoaderOptions()
+        self.sequence: CaptureSequence | None = None
+
+    @classmethod
+    def can_load(cls, root: Path | str) -> bool:
+        try:
+            discover_files(root)
+        except (FileNotFoundError, ValueError):
+            return False
+        return True
 
     def load(self) -> CaptureSequence:
         """Sensors, video properties and per-frame timestamps, validated; no pixels are decoded."""
@@ -169,7 +186,7 @@ class OpenCameraSensorsLoader:
                 checks["warnings"].append(f"reference image {jpg.name} matches no frame timestamp")
                 log.warning(checks["warnings"][-1])
 
-        return CaptureSequence(
+        self.sequence = CaptureSequence(
             sequence_id=f"{files.root.name}_{files.stamp}",
             source_type=SOURCE_TYPE,
             root=files.root,
@@ -178,3 +195,38 @@ class OpenCameraSensorsLoader:
             reference_images=reference_images,
             checks=checks,
         )
+        if self.options.verify_reference_jpegs and reference_images:
+            self._verify_reference_images()
+        return self.sequence
+
+    def _verify_reference_images(self) -> None:
+        checks = self.sequence.checks
+        result = check_reference_images(self, self.sequence, max_checks=self.options.max_reference_checks)
+        checks["reference_images"] = result
+        if result["rotation_mismatch"]:
+            checks["rotation_mismatch"] = True
+            checks["warnings"].append(
+                f"reference JPEGs fit rotation {result['best_rotation']} best, "
+                f"not the chosen {self.sequence.cameras['cam0'].rotation_deg}: {result['rotation_psnr_db']}"
+            )
+            log.warning(checks["warnings"][-1])
+        if result["min_psnr_db"] < MIN_REFERENCE_PSNR_DB:
+            checks["warnings"].append(f"reference JPEG min PSNR {result['min_psnr_db']:.1f} dB < {MIN_REFERENCE_PSNR_DB}")
+            log.warning(checks["warnings"][-1])
+
+    def iter_frames(
+        self, camera_id: str = "cam0", indices: Iterable[int] | None = None, scale: float = 1.0
+    ) -> Iterator[Frame]:
+        if self.sequence is None:
+            self.load()
+        camera = self.sequence.cameras[camera_id]
+        n = camera.num_frames
+        if indices is None:
+            indices = range(n)
+        else:
+            indices = sorted(set(indices))
+            if indices and (indices[0] < 0 or indices[-1] >= n):
+                raise IndexError(f"frame indices must be in [0, {n}), got {indices[0]}..{indices[-1]}")
+        reader = VideoReader(camera.path, camera.rotation_deg)
+        for idx, image in reader.iter_frames(indices, scale):
+            yield Frame(camera_id=camera_id, idx=idx, t_ns=int(camera.frame_t_ns[idx]), image=image)

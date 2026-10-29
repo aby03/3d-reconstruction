@@ -58,3 +58,11 @@ class CaptureSequence:
     reference_images: dict[int, Path] = field(default_factory=dict)  # frame idx -> jpg
     metadata: dict[str, Any] = field(default_factory=dict)
     checks: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class Frame:
+    camera_id: str
+    idx: int
+    t_ns: int
+    image: np.ndarray  # (H, W, 3) uint8 RGB, upright

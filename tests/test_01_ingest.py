@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from recon.capture.open_camera_sensors import OpenCameraSensorsLoader, discover_files, read_sensor_csv
+from recon.capture.open_camera_sensors import (
+    LoaderOptions,
+    OpenCameraSensorsLoader,
+    discover_files,
+    read_sensor_csv,
+)
 from recon.core.types import SensorKind
 from recon.sensors.streams import clean_stream, stream_stats
 
@@ -57,3 +62,33 @@ def test_sequence(sequence):
     assert cam.stored_size == (1920, 1080)
     assert cam.rotation_deg == 90  # display matrix says -90
     assert cam.upright_size == (1080, 1920)
+
+
+def test_iter_frames_upright(tiny_capture, sequence):
+    loader = OpenCameraSensorsLoader(tiny_capture, LoaderOptions(verify_reference_jpegs=False))
+    t_ns = sequence.cameras["cam0"].frame_t_ns
+    frames = list(loader.iter_frames(indices=[299, 0, 150, 1]))
+    assert [f.idx for f in frames] == [0, 1, 150, 299]
+    for f in frames:
+        assert f.camera_id == "cam0"
+        assert f.image.shape == (1920, 1080, 3) and f.image.dtype == np.uint8
+        assert f.t_ns == t_ns[f.idx]
+
+    (half,) = loader.iter_frames(indices=[0], scale=0.5)
+    assert half.image.shape == (960, 540, 3)
+
+
+def test_extract_frames(tiny_capture, tmp_path):
+    loader = OpenCameraSensorsLoader(tiny_capture, LoaderOptions(verify_reference_jpegs=False))
+    paths = loader.extract_frames([150], tmp_path)
+    assert paths == {150: tmp_path / "cam0" / "000150.jpg"}
+    assert paths[150].stat().st_size > 0
+
+
+def test_reference_images(sequence):
+    ref = sequence.checks["reference_images"]
+    assert ref["checked"] == 5
+    assert ref["min_psnr_db"] > 25
+    assert ref["best_rotation"] == sequence.cameras["cam0"].rotation_deg == 90
+    assert not ref["rotation_mismatch"]
+    assert "rotation_mismatch" not in sequence.checks
