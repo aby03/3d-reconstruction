@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 
 class SensorKind(StrEnum):
@@ -66,3 +67,11 @@ class Frame:
     idx: int
     t_ns: int
     image: np.ndarray  # (H, W, 3) uint8 RGB, upright
+
+
+@dataclass(slots=True)
+class FrameSensorData:
+    """Sensor values interpolated at every frame time of one camera."""
+
+    frames: pd.DataFrame  # one row per frame, columns in recon.sensors.sync.COLUMNS
+    report: dict[str, Any] = field(default_factory=dict)

@@ -8,6 +8,7 @@ from recon.capture.open_camera_sensors import (
     read_sensor_csv,
 )
 from recon.core.types import SensorKind
+from recon.sensors.sync import COLUMNS, SyncOptions, synchronize
 from recon.sensors.streams import clean_stream, stream_stats
 
 EXPECTED_RATE_HZ = {SensorKind.ACCEL: 457.0, SensorKind.GYRO: 457.0, SensorKind.MAG: 100.0}
@@ -92,3 +93,15 @@ def test_reference_images(sequence):
     assert ref["best_rotation"] == sequence.cameras["cam0"].rotation_deg == 90
     assert not ref["rotation_mismatch"]
     assert "rotation_mismatch" not in sequence.checks
+
+
+def test_synchronize(sequence):
+    sync = synchronize(sequence, SyncOptions())
+    df = sync.frames
+    assert list(df.columns) == COLUMNS
+    assert len(df) == 300 and np.array_equal(df["idx"], np.arange(300))
+    assert np.array_equal(df["t_ns"], sequence.cameras["cam0"].frame_t_ns)
+    assert df["valid"].all()
+    assert df["accel_dt_ms"].max() < 3 and df["gyro_dt_ms"].max() < 3
+    assert df[["mag_x", "mag_y", "mag_z"]].notna().all().all()
+    assert sync.report["frames_valid_ratio"] == 1.0
