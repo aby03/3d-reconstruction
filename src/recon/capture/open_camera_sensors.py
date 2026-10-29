@@ -9,13 +9,16 @@ Layout:
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from recon.core.types import SensorKind, SensorStream
+from recon.capture.timing import check_frame_timing
+from recon.core.types import CaptureSequence, SensorKind, SensorStream, VideoStream
+from recon.io.video import probe_video
+from recon.sensors.streams import clean_stream, stream_stats
 
 log = logging.getLogger(__name__)
 
@@ -24,10 +27,16 @@ REFERENCE_RE = re.compile(r"(?P<t_ns>\d+)\.jpg")
 
 DEVICE_FRAME = "android_device"
 SENSOR_UNITS = {SensorKind.ACCEL: "m/s^2", SensorKind.GYRO: "rad/s", SensorKind.MAG: "uT"}
+SOURCE_TYPE = "open_camera_sensors"
 
 
 @dataclass(slots=True)
-class CaptureFiles:
+class LoaderOptions:
+    allow_mismatch: bool = False  # truncate video frames and timestamps to the shorter instead of failing
+
+
+@dataclass(slots=True)
+class OpenCameraFiles:
     root: Path
     stamp: str
     video: Path
@@ -56,7 +65,7 @@ def _resolve_root(path: Path) -> tuple[Path, Path]:
     raise FileNotFoundError(f"no Open Camera Sensors capture at {path}")
 
 
-def discover_files(path: Path | str) -> CaptureFiles:
+def discover_files(path: Path | str) -> OpenCameraFiles:
     """Find the files of a capture, given its root dir or its stamp dir."""
     path = Path(path).resolve()
     if not path.is_dir():
@@ -69,7 +78,7 @@ def discover_files(path: Path | str) -> CaptureFiles:
     if not frame_timestamps.is_file():
         raise FileNotFoundError(f"missing frame timestamps: {frame_timestamps}")
 
-    files = CaptureFiles(root=root, stamp=stamp, video=video, frame_timestamps=frame_timestamps)
+    files = OpenCameraFiles(root=root, stamp=stamp, video=video, frame_timestamps=frame_timestamps)
     for kind in SensorKind:
         sensor_path = stamp_dir / f"VID_{stamp}{kind}.csv"
         if sensor_path.is_file():
@@ -108,3 +117,64 @@ def read_sensor_csv(path: Path | str, kind: SensorKind) -> SensorStream:
     return SensorStream(
         kind=kind, t_ns=t_ns, values=values, units=SENSOR_UNITS[kind], frame=DEVICE_FRAME, source_file=path
     )
+
+
+class OpenCameraSensorsLoader:
+    def __init__(self, root: Path | str, options: LoaderOptions | None = None):
+        self.root = Path(root)
+        self.options = options or LoaderOptions()
+
+    def load(self) -> CaptureSequence:
+        """Sensors, video properties and per-frame timestamps, validated; no pixels are decoded."""
+        files = discover_files(self.root)
+        checks: dict = {"warnings": list(files.warnings), "sensors": {}}
+
+        sensors = {}
+        for kind, path in files.sensors.items():
+            stream, counts = clean_stream(read_sensor_csv(path, kind))
+            sensors[kind] = stream
+            checks["sensors"][str(kind)] = counts | stream_stats(stream)
+
+        frame_t_ns = read_frame_timestamps(files.frame_timestamps)
+        probe = probe_video(files.video)
+        timing = check_frame_timing(probe.pts_s, frame_t_ns, self.options.allow_mismatch)
+        checks["frame_timing"] = asdict(timing) | {"ok": timing.ok}
+        if not timing.ok:
+            checks["warnings"].append(f"frame timing check failed: {checks['frame_timing']}")
+            log.warning(checks["warnings"][-1])
+        n = timing.num_frames
+        frame_t_ns = frame_t_ns[:n]
+
+        rotation_deg = (-probe.display_rotation) % 360
+        w, h = probe.stored_size
+        camera = VideoStream(
+            camera_id="cam0",
+            path=files.video,
+            codec=probe.codec,
+            stored_size=(w, h),
+            upright_size=(h, w) if rotation_deg in (90, 270) else (w, h),
+            rotation_deg=rotation_deg,
+            num_frames=n,
+            nominal_fps=probe.nominal_fps,
+            pts_s=probe.pts_s[:n],
+            frame_t_ns=frame_t_ns,
+        )
+
+        frame_index = {int(t): i for i, t in enumerate(frame_t_ns)}
+        reference_images = {}
+        for t_ns, jpg in files.reference_images.items():
+            if t_ns in frame_index:
+                reference_images[frame_index[t_ns]] = jpg
+            else:
+                checks["warnings"].append(f"reference image {jpg.name} matches no frame timestamp")
+                log.warning(checks["warnings"][-1])
+
+        return CaptureSequence(
+            sequence_id=f"{files.root.name}_{files.stamp}",
+            source_type=SOURCE_TYPE,
+            root=files.root,
+            cameras={camera.camera_id: camera},
+            sensors=sensors,
+            reference_images=reference_images,
+            checks=checks,
+        )

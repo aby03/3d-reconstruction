@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from recon.capture.open_camera_sensors import discover_files, read_sensor_csv
+from recon.capture.open_camera_sensors import OpenCameraSensorsLoader, discover_files, read_sensor_csv
 from recon.core.types import SensorKind
 from recon.sensors.streams import clean_stream, stream_stats
 
@@ -29,3 +29,31 @@ def test_sensor_streams(tiny_capture, kind):
     # int64 end to end: the last timestamp equals the raw text exactly
     assert stream.t_ns[-1] == int(path.read_text().split()[-1].rsplit(",", 1)[-1])
     assert stream_stats(stream)["rate_hz"] == pytest.approx(EXPECTED_RATE_HZ[kind], rel=0.05)
+
+
+@pytest.fixture(scope="module")
+def sequence(tiny_capture):
+    return OpenCameraSensorsLoader(tiny_capture).load()
+
+
+def test_frame_timing(sequence):
+    timing = sequence.checks["frame_timing"]
+    assert timing["num_pts"] == timing["num_timestamps"] == 300
+    assert timing["drops_pts"] == timing["drops_t"] == [1]
+    assert timing["delta_corr"] > 0.95
+    assert timing["residual_max_ms"] < 1.0
+    assert timing["ok"]
+
+
+def test_sequence(sequence):
+    assert sequence.sequence_id == "room2_tiny_20261021_211400"
+    assert set(sequence.sensors) == set(SensorKind)
+    assert sequence.checks["warnings"] == []
+    assert len(sequence.reference_images) == 5
+
+    cam = sequence.cameras["cam0"]
+    assert cam.num_frames == len(cam.pts_s) == len(cam.frame_t_ns) == 300
+    assert np.all(np.diff(cam.pts_s) > 0)
+    assert cam.stored_size == (1920, 1080)
+    assert cam.rotation_deg == 90  # display matrix says -90
+    assert cam.upright_size == (1080, 1920)
