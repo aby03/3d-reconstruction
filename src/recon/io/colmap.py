@@ -1,4 +1,4 @@
-"""COLMAP models and image roots through pycolmap: symlinked image roots, image names, camera intrinsics, model files."""
+"""COLMAP helpers on top of pycolmap: symlinked image roots, image names, camera intrinsics, model files."""
 
 import os
 import shutil

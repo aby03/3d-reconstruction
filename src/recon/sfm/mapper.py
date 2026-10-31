@@ -12,7 +12,7 @@ class MapperOptions:
     backend: Literal["global"] = "global"
 
 
-def _global_options(seed: int, use_gpu: bool, gpu_index: int) -> pycolmap.GlobalPipelineOptions:
+def _global_options(seed: int, use_gpu: bool, gpu_index: int, use_gravity: bool) -> pycolmap.GlobalPipelineOptions:
     options = pycolmap.GlobalPipelineOptions()
     gpu = str(gpu_index)
     mapper = options.mapper
@@ -26,6 +26,8 @@ def _global_options(seed: int, use_gpu: bool, gpu_index: int) -> pycolmap.Global
     mapper.bundle_adjustment.refine_focal_length = True
     mapper.bundle_adjustment.refine_extra_params = True
     mapper.bundle_adjustment.refine_principal_point = False
+    # gravity pose priors (down in the camera frame) align the model's +y with gravity
+    mapper.rotation_averaging.use_gravity = use_gravity
     return options
 
 
@@ -37,12 +39,20 @@ def largest_model(models: dict[int, pycolmap.Reconstruction]) -> pycolmap.Recons
 
 
 def run_global_mapper(
-    database: Path, image_root: Path, out_dir: Path, seed: int = 0, use_gpu: bool = True, gpu_index: int = 0
+    database: Path,
+    image_root: Path,
+    out_dir: Path,
+    seed: int = 0,
+    use_gpu: bool = True,
+    gpu_index: int = 0,
+    use_gravity: bool = False,
 ) -> pycolmap.Reconstruction | None:
     """Global SfM (rotation averaging, global positioning, BA); the largest model, None when there is none.
 
+    `use_gravity` constrains rotation averaging with the gravity pose priors in the database.
     COLMAP writes every model it finds into `out_dir/<k>/`.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    models = pycolmap.global_mapping(database, image_root, out_dir, _global_options(seed, use_gpu, gpu_index))
+    options = _global_options(seed, use_gpu, gpu_index, use_gravity)
+    models = pycolmap.global_mapping(database, image_root, out_dir, options)
     return largest_model(models)

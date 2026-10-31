@@ -64,5 +64,14 @@ sfm:
     quadratic_overlap: true      # sequential: and with the ones 2^k further on
     min_num_inliers: 15          # a pair is verified with at least this many inlier matches
     max_num_matches: 32768
+  priors:
+    use_gravity_prior: true      # keyframe gravity (priors/gravity_cam.csv) constrains rotation averaging
+    gravity_min_conf: 0.3        # priors below this confidence are left out
+    imu_pair_filter:             # drop verified pairs whose relative rotation disagrees with the IMU
+      enabled: true
+      max_rot_err_deg: 10.0      # pairs up to max_dt_s apart: angle between image and gyro rotation
+      max_dt_s: 5.0
+      tilt_err_deg: 5.0          # other pairs: angle between the rotated gravity of one image and the other's
+      max_removed_frac: 0.3      # more disagreeing pairs than this: the IMU is suspect, remove nothing (warning)
   mapper:
     backend: global              # COLMAP's global mapper (GLOMAP)

@@ -128,7 +128,9 @@ def contact_sheet(
     return path
 
 
-def plot_histogram(values: np.ndarray, path: Path, title: str = "", xlabel: str = "", bins: int | Sequence = 50) -> Path:
+def plot_histogram(
+    values: np.ndarray, path: Path, title: str = "", xlabel: str = "", bins: int | Sequence = 50
+) -> Path:
     """Histogram of `values` with its median marked."""
     values = np.asarray(values)
     fig = Figure(figsize=(6, 4))

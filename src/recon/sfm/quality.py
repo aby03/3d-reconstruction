@@ -63,3 +63,19 @@ def model_stats(rec: pycolmap.Reconstruction, image_names: Sequence[str]) -> dic
         "mean_track_len": rec.compute_mean_track_length(),
         "unregistered_images": sorted(set(image_names) - registered),
     }
+
+
+def gravity_spread(rec: pycolmap.Reconstruction, gravity: dict[str, np.ndarray]) -> dict[str, float | None]:
+    """Median and 90th percentile angle (degrees) between each registered image's gravity prior, rotated into the
+    model frame, and their mean direction; None without priors. Small when the model and the IMU agree on "down"."""
+    g_world = [
+        rec.images[i].cam_from_world().rotation.matrix().T @ gravity[rec.images[i].name]
+        for i in rec.reg_image_ids()
+        if rec.images[i].name in gravity
+    ]
+    if not g_world:
+        return {"median": None, "p90": None}
+    g = np.array(g_world) / np.linalg.norm(g_world, axis=1, keepdims=True)
+    mean = g.mean(axis=0) / np.linalg.norm(g.mean(axis=0))
+    angles = np.degrees(np.arccos(np.clip(g @ mean, -1.0, 1.0)))
+    return {"median": float(np.median(angles)), "p90": float(np.percentile(angles, 90))}

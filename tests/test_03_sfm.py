@@ -1,3 +1,5 @@
+import shutil
+
 import numpy as np
 import pycolmap
 import pytest
@@ -7,8 +9,9 @@ from recon.pipeline.cli import main
 from recon.pipeline.device import probe_device
 from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s02_keyframes import ARTIFACTS as KEYFRAME_ARTIFACTS
-from recon.pipeline.stages.s02_keyframes import KEYFRAMES_COLUMNS
+from recon.pipeline.stages.s02_keyframes import GRAVITY_COLUMNS, KEYFRAMES_COLUMNS
 from recon.pipeline.stages.s03_sfm import ARTIFACTS
+from recon.sfm.priors import PAIR_FILTER_COLUMNS
 
 REPORT_KEYS = {
     "num_images_input",
@@ -23,8 +26,12 @@ REPORT_KEYS = {
     "num_verified_pairs",
     "matching_strategy",
     "mapper_used",
+    "num_gravity_priors",
     "gravity_prior_used",
+    "gravity_spread_deg",
     "pair_filter_removed",
+    "pair_filter_checked",
+    "pair_filter_disabled",
     "focal_px",
     "unregistered_images",
     "per_image",
@@ -70,9 +77,8 @@ def test_report(report, keyframe_names):
     assert report["num_points3D"] > 1000
     assert report["num_models"] >= 1 and report["num_verified_pairs"] > 0
     assert report["mapper_used"] == "global" and report["matching_strategy"] == "exhaustive"
-    assert not report["gravity_prior_used"] and report["pair_filter_removed"] == 0
     assert set(report["per_image"]) | set(report["unregistered_images"]) == set(keyframe_names)
-    assert set(report["timings"]) == {"features", "matching", "mapping", "outputs"}
+    assert set(report["timings"]) == {"features", "matching", "pair_filter", "mapping", "outputs"}
 
 
 def test_model(sfm_run, report, keyframe_names):
@@ -134,3 +140,51 @@ def test_resume_errors(tiny_capture, output_root, sfm_run, tmp_path):
 def test_cli_needs_keyframes(tiny_capture, tmp_path, capsys):
     assert main(["sfm", "--input", str(tiny_capture), "--output-root", str(tmp_path)]) == 1
     assert "run `recon keyframes` first" in capsys.readouterr().out
+
+
+def test_gravity_priors(pipeline_run, sid, sfm_run, report):
+    gravity = read_csv(pipeline_run.stage_dir("keyframes", sid) / KEYFRAME_ARTIFACTS["gravity_priors"], GRAVITY_COLUMNS)
+    assert report["num_gravity_priors"] == (gravity["conf"] >= 0.3).sum() > 0
+    assert report["gravity_prior_used"]
+    db = pycolmap.Database.open(sfm_run / ARTIFACTS["database"])
+    priors = db.read_all_pose_priors()
+    db.close()
+    assert sum(prior.has_gravity() for prior in priors) == report["num_gravity_priors"]
+    # the model and the IMU agree on "down"
+    assert report["gravity_spread_deg"]["median"] < 3
+
+
+def test_pair_filter(sfm_run, report):
+    errors = read_csv(sfm_run / ARTIFACTS["pair_filter"], PAIR_FILTER_COLUMNS)
+    assert len(errors) == report["num_verified_pairs"]
+    assert report["pair_filter_checked"] == {"gyro": len(errors), "tilt": 0, "none": 0}  # all within 5 s
+    assert not report["pair_filter_disabled"]
+    assert report["pair_filter_removed"] == errors["removed"].sum() <= 0.3 * len(errors)
+    removed = errors["removed"]
+    assert (errors.loc[removed, "err_deg"] > 10).all() and (errors.loc[~removed, "err_deg"] <= 10).all()
+    # image and gyro rotations agree: also checks cam2_from_cam1 against our cam_j_from_cam_i
+    assert errors["err_deg"].median() < 3
+    db = pycolmap.Database.open(sfm_run / ARTIFACTS["database"])
+    num_pairs = len(db.read_two_view_geometries()[0])
+    db.close()
+    assert num_pairs == len(errors) - report["pair_filter_removed"]
+
+
+@pytest.fixture(scope="module")
+def no_imu(tiny_capture, output_root, sfm_run, tmp_path_factory):
+    """sfm without gravity priors and pair filter on a copy of the shared sequences; returns its report."""
+    root = tmp_path_factory.mktemp("no_imu")
+    shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
+    overrides = ["sfm.priors.use_gravity_prior=false", "sfm.priors.imu_pair_filter.enabled=false"]
+    assert _run(tiny_capture, root, "--only", "sfm", *[a for o in overrides for a in ("--set", o)]) == 0
+    (out,) = (root / "room2_tiny" / "runs").glob("*/03_sfm")
+    return out, read_json(out / ARTIFACTS["report"])
+
+
+def test_without_imu(no_imu, report):
+    out, no_imu_report = no_imu
+    assert not no_imu_report["gravity_prior_used"] and no_imu_report["num_gravity_priors"] == 0
+    assert no_imu_report["pair_filter_removed"] == 0
+    errors = read_csv(out / ARTIFACTS["pair_filter"], PAIR_FILTER_COLUMNS)
+    assert len(errors) == no_imu_report["num_verified_pairs"] and not errors["removed"].any()
+    assert no_imu_report["registered_ratio"] >= 0.9

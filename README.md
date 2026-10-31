@@ -131,7 +131,10 @@ Needs finished keyframes (`recon keyframes` first, or use `recon run`).
 pixi run recon sfm --input data/room2_tiny
 pixi run recon sfm --input data/room2_tiny --set sfm.matching.strategy=sequential --force
 ```
-Same as `recon run --only sfm --resume`: it continues in the latest run of the scene (or starts a new run when there is none), so a finished SfM is kept; `--resume RUN_ID` picks another run and `--force` re-runs it. It extracts SIFT features of every keyframe (GPU), matches them (`sfm.matching.strategy`: `auto` matches every pair up to 200 keyframes and each keyframe with its 20 successors beyond that) and runs COLMAP's global mapper. The result is one COLMAP model with a `SIMPLE_RADIAL` camera per sequence, written to `outputs/room2_tiny/runs/<run_id>/03_sfm/`. COLMAP's own log goes to `runs/<run_id>/logs/sfm/colmap.log.<timestamp>`. Keys: `sfm.initial_camera_model`, `sfm.features.*` (`max_num_features`, `max_image_size`, `domain_size_pooling`), `sfm.matching.*` (`strategy`, `exhaustive_max_images`, `overlap`, `quadratic_overlap`, `min_num_inliers`, `max_num_matches`), `sfm.mapper.backend`.
+Same as `recon run --only sfm --resume`: it continues in the latest run of the scene (or starts a new run when there is none), so a finished SfM is kept; `--resume RUN_ID` picks another run and `--force` re-runs it. It extracts SIFT features of every keyframe (GPU), matches them (`sfm.matching.strategy`: `auto` matches every pair up to 200 keyframes and each keyframe with its 20 successors beyond that) and runs COLMAP's global mapper. The IMU helps: each keyframe's gravity direction (`priors/gravity_cam.csv`) is written into the COLMAP database as a pose prior and constrains rotation averaging (`sfm.priors.use_gravity_prior`; the model's +y then points down), and before mapping every verified image pair whose relative rotation disagrees with the gyro by more than 10° (pairs over 5 s apart: whose rotation doesn't carry one image's gravity onto the other's within 5°) is removed (`sfm.priors.imu_pair_filter.*`; if more than 30% disagree, nothing is removed and a warning is logged). The result is one COLMAP model with a `SIMPLE_RADIAL` camera per sequence, written to `outputs/room2_tiny/runs/<run_id>/03_sfm/`. COLMAP's own log goes to `runs/<run_id>/logs/sfm/colmap.log.<timestamp>`. Keys: `sfm.initial_camera_model`, `sfm.features.*` (`max_num_features`, `max_image_size`, `domain_size_pooling`), `sfm.matching.*` (`strategy`, `exhaustive_max_images`, `overlap`, `quadratic_overlap`, `min_num_inliers`, `max_num_matches`), `sfm.priors.*` (`use_gravity_prior`, `gravity_min_conf`, `imu_pair_filter.{enabled, max_rot_err_deg, max_dt_s, tilt_err_deg, max_removed_frac}`), `sfm.mapper.backend`. Without the IMU:
+```bash
+pixi run recon sfm --input data/room2_tiny --force --set sfm.priors.use_gravity_prior=false --set sfm.priors.imu_pair_filter.enabled=false
+```
 
 Results to look at:
 ```bash
@@ -140,7 +143,7 @@ cat $D/stage_manifest.json $D/reports/sfm_report.json $D/intrinsics.json
 ls $D/sparse/raw $D/reports/plots/   # COLMAP model; track_len_hist, reproj_hist, trajectory_topdown
 pixi run colmap gui --database_path $D/database.db --image_path $D/images --import_path $D/sparse/raw
 ```
-`sparse_points.ply` holds the coloured sparse points; `images/` holds one symlink per sequence to its keyframe images (the COLMAP image root).
+`reports/pair_filter.csv` lists every verified pair with its check (`gyro`, `tilt`, `none`), angle error and whether it was removed; `gravity_spread_deg` in the report is how far the registered cameras' gravity directions spread around their mean in the model (small = model and IMU agree). `sparse_points.ply` holds the coloured sparse points; `images/` holds one symlink per sequence to its keyframe images (the COLMAP image root).
 
 ### Tests
 ```bash

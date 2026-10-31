@@ -5,24 +5,41 @@ import logging
 import shutil
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pycolmap
 
 from recon.io.colmap import camera_intrinsics, link_image_root, parse_image_name, write_model
-from recon.io.tables import read_csv, write_json
+from recon.io.tables import read_csv, read_json, write_csv, write_json
 from recon.pipeline.device import Backend
-from recon.pipeline.run_dir import stage_dir
+from recon.pipeline.run_dir import read_manifest, stage_dir
 from recon.pipeline.stage import Stage, StageOutput, register_stage
-from recon.pipeline.stages import s02_keyframes
+from recon.pipeline.stages import s01_ingest, s02_keyframes
 from recon.report import plots
 from recon.sfm import SfmOptions
 from recon.sfm.features import extract_features
 from recon.sfm.mapper import run_global_mapper
 from recon.sfm.matching import match_features, num_verified_pairs
-from recon.sfm.quality import camera_centres, model_stats, per_image_stats, reprojection_errors, track_lengths
+from recon.sfm.priors import (
+    PAIR_CHECKS,
+    PAIR_FILTER_COLUMNS,
+    GyroRotations,
+    filter_pairs,
+    pair_rotation_errors,
+    write_gravity_priors,
+)
+from recon.sfm.quality import (
+    camera_centres,
+    gravity_spread,
+    model_stats,
+    per_image_stats,
+    reprojection_errors,
+    track_lengths,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +53,7 @@ ARTIFACTS = {
     "points": "sparse_points.ply",
     "intrinsics": "intrinsics.json",
     "report": "reports/sfm_report.json",
+    "pair_filter": "reports/pair_filter.csv",
     "plot_track_len": "reports/plots/track_len_hist.png",
     "plot_reproj": "reports/plots/reproj_hist.png",
     "plot_trajectory": "reports/plots/trajectory_topdown.png",
@@ -62,15 +80,43 @@ def _colmap_log(log_file: Path | None) -> Iterator[None]:
         glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = saved
 
 
-def _keyframe_images(sequence_dirs: dict[str, Path]) -> tuple[list[str], dict[str, Path]]:
-    """Every keyframe's image name (sorted) and each sequence's keyframe image dir."""
-    names, image_dirs = [], {}
+@dataclass(slots=True)
+class SceneInputs:
+    """What SfM reads from every sequence: keyframes, their gravity priors and the gyro rotations."""
+
+    images: pd.DataFrame  # image_name, sequence_id, idx, t_ns; sorted by name
+    image_dirs: dict[str, Path]  # sequence_id -> keyframe image dir
+    gravity: pd.DataFrame  # gravity_cam.csv rows of every sequence
+    gyro: dict[str, GyroRotations]  # sequences that have gyro rotations
+
+    @property
+    def names(self) -> list[str]:
+        return self.images["image_name"].tolist()
+
+
+def _read_inputs(sequence_dirs: dict[str, Path]) -> SceneInputs:
+    images, gravity, image_dirs, gyro = [], [], {}, {}
     for sequence_id, sequence_dir in sequence_dirs.items():
         keyframes = stage_dir(sequence_dir, s02_keyframes.DIR_NAME)
         table = read_csv(keyframes / s02_keyframes.ARTIFACTS["keyframes"], s02_keyframes.KEYFRAMES_COLUMNS)
-        names += table["image_name"].tolist()
+        images.append(table[["image_name", "idx", "t_ns"]].assign(sequence_id=sequence_id))
         image_dirs[sequence_id] = keyframes / s02_keyframes.ARTIFACTS["images"]
-    return sorted(names), image_dirs
+        gravity.append(read_csv(keyframes / s02_keyframes.ARTIFACTS["gravity_priors"], s02_keyframes.GRAVITY_COLUMNS))
+        ingest = stage_dir(sequence_dir, s01_ingest.DIR_NAME)
+        if "frame_rotations" in read_manifest(ingest).artifacts:
+            R_cum = np.load(ingest / s01_ingest.ARTIFACTS["frame_rotations"])["R_cum"]
+            info = read_json(ingest / s01_ingest.ARTIFACTS["sequence"])
+            R_cam_imu = np.asarray(info["extrinsics"][s02_keyframes.CAMERA_ID]["R_cam_imu"])
+            gyro[sequence_id] = GyroRotations(R_cum, R_cam_imu)
+    table = pd.concat(images, ignore_index=True).sort_values("image_name", ignore_index=True)
+    return SceneInputs(table, image_dirs, pd.concat(gravity, ignore_index=True), gyro)
+
+
+def _gravity_vectors(gravity: pd.DataFrame, min_conf: float) -> dict[str, np.ndarray]:
+    rows = gravity.dropna(subset=["gx", "gy", "gz", "conf"])
+    rows = rows[rows["conf"] >= min_conf]
+    vectors = rows[["gx", "gy", "gz"]].to_numpy(dtype=float)
+    return dict(zip(rows["image_name"], vectors))
 
 
 def _camera_keys(rec: pycolmap.Reconstruction) -> dict[int, str]:
@@ -109,21 +155,33 @@ def run_sfm(
     seed: int = 0,
     log_file: Path | None = None,
 ) -> StageOutput:
-    """Run step 3 on the keyframes of `sequence_dirs` (sequence_id -> sequence dir), writing into the stage dir `out`."""
+    """Run step 3 on the keyframes of `sequence_dirs` (sequence_id -> sequence dir), writing into the stage dir."""
     options = options or SfmOptions()
+    priors = options.priors
     use_gpu = backend == "cuda"
     database = out / ARTIFACTS["database"]
-    timings = {}
+    timings, warnings = {}, []
 
-    names, image_dirs = _keyframe_images(sequence_dirs)
-    image_root = link_image_root(out / IMAGE_ROOT, image_dirs)
-    log.warning("no intrinsics prior: the focal length starts from COLMAP's guess and is refined (calibrate for better)")
+    inputs = _read_inputs(sequence_dirs)
+    names = inputs.names
+    image_root = link_image_root(out / IMAGE_ROOT, inputs.image_dirs)
+    gravity = _gravity_vectors(inputs.gravity, priors.gravity_min_conf)
+    log.warning("no intrinsics prior: the focal length starts from COLMAP's guess and is refined (calibrate instead)")
 
     with _colmap_log(log_file):
         t0 = time.perf_counter()
-        extract_features(database, image_root, names, options.features, options.initial_camera_model, use_gpu, gpu_index)
+        camera_model = options.initial_camera_model
+        extract_features(database, image_root, names, options.features, camera_model, use_gpu, gpu_index)
+        num_gravity_priors = 0
+        if priors.use_gravity_prior:
+            num_gravity_priors = write_gravity_priors(database, inputs.gravity, priors.gravity_min_conf)
         timings["features"] = time.perf_counter() - t0
-        log.info("extracted features of %d images in %.1f s", len(names), timings["features"])
+        log.info(
+            "extracted features of %d images in %.1f s, %d gravity priors",
+            len(names),
+            timings["features"],
+            num_gravity_priors,
+        )
 
         t0 = time.perf_counter()
         strategy = match_features(database, len(names), options.matching, use_gpu, gpu_index)
@@ -132,13 +190,38 @@ def run_sfm(
         log.info("%s matching: %d verified pairs in %.1f s", strategy, num_pairs, timings["matching"])
 
         t0 = time.perf_counter()
+        pair_filter = priors.imu_pair_filter
+        errors = pair_rotation_errors(database, inputs.images, inputs.gyro, gravity, pair_filter)
+        if pair_filter.enabled and (errors["check"] == "none").all() and len(errors):
+            warnings.append("IMU pair filter skipped: no gyro rotations and no gravity priors")
+            log.warning(warnings[-1])
+        errors, disagree_frac = filter_pairs(database, errors, pair_filter)
+        if disagree_frac is not None:
+            warnings.append(
+                f"pair filter disabled: {disagree_frac:.0%} of pairs disagree with the IMU"
+                " (check R_cam_imu / time offset)"
+            )
+            log.warning(warnings[-1])
+        write_csv(errors, out / ARTIFACTS["pair_filter"], PAIR_FILTER_COLUMNS)
+        num_removed = int(errors["removed"].sum())
+        timings["pair_filter"] = time.perf_counter() - t0
+        log.info("IMU pair filter: %d of %d pairs removed", num_removed, len(errors))
+
+        t0 = time.perf_counter()
+        use_gravity = priors.use_gravity_prior and num_gravity_priors > 0
         models_dir = out / "sparse" / "_global"
-        rec = run_global_mapper(database, image_root, models_dir, seed, use_gpu, gpu_index)
+        rec = run_global_mapper(database, image_root, models_dir, seed, use_gpu, gpu_index, use_gravity)
         num_models = len([p for p in models_dir.iterdir() if p.is_dir()]) if models_dir.is_dir() else 0
         timings["mapping"] = time.perf_counter() - t0
     if rec is None:
         raise RuntimeError("global mapper produced no model")
-    log.info("global mapper: %d of %d images registered in %.1f s", rec.num_reg_images(), len(names), timings["mapping"])
+    log.info(
+        "global mapper%s: %d of %d images registered in %.1f s",
+        " with gravity" if use_gravity else "",
+        rec.num_reg_images(),
+        len(names),
+        timings["mapping"],
+    )
 
     t0 = time.perf_counter()
     rec.extract_colors_for_all_images(image_root)
@@ -158,8 +241,12 @@ def run_sfm(
         "num_verified_pairs": num_pairs,
         "matching_strategy": strategy,
         "mapper_used": "global",
-        "gravity_prior_used": False,
-        "pair_filter_removed": 0,
+        "num_gravity_priors": num_gravity_priors,
+        "gravity_prior_used": use_gravity,
+        "gravity_spread_deg": gravity_spread(rec, gravity),
+        "pair_filter_removed": num_removed,
+        "pair_filter_checked": {check: int((errors["check"] == check).sum()) for check in PAIR_CHECKS},
+        "pair_filter_disabled": disagree_frac is not None,
         "focal_px": {key: intrinsics[key]["fx"] for key in intrinsics},
         "unregistered_images": stats["unregistered_images"],
         "per_image": per_image_stats(rec),
@@ -171,6 +258,7 @@ def run_sfm(
     return StageOutput(
         artifacts=dict(ARTIFACTS),
         metrics={k: report[k] for k in metrics},
+        warnings=warnings,
         backends={"features": backend, "matching": backend, "mapper": backend},
     )
 
