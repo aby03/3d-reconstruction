@@ -3,6 +3,7 @@
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import cv2
 import numpy as np
 from matplotlib.figure import Figure
 
@@ -76,3 +77,52 @@ def plot_series_with_events(
     if len(event_t_s) and event_label:
         ax.legend(loc="upper right")
     return _save(fig, path)
+
+
+def plot_scores_timeline(
+    t_s: np.ndarray,
+    series: Mapping[str, np.ndarray],
+    keyframe_t_s: np.ndarray,
+    path: Path,
+    thresholds: Mapping[str, float] | None = None,
+) -> Path:
+    """One panel per score over time, keyframes marked as dots on each line, optional threshold lines."""
+    thresholds = thresholds or {}
+    fig = Figure(figsize=(12, 2.2 * len(series)))
+    axes = fig.subplots(len(series), 1, sharex=True, squeeze=False)[:, 0]
+    keyframe_t_s = np.asarray(keyframe_t_s)
+    for ax, (name, values) in zip(axes, series.items()):
+        ax.plot(t_s, values, lw=0.6)
+        on_key = np.searchsorted(t_s, keyframe_t_s).clip(0, len(t_s) - 1)
+        ax.plot(keyframe_t_s, np.asarray(values)[on_key], "o", ms=3, color="tab:red", label="keyframes")
+        if name in thresholds:
+            ax.axhline(thresholds[name], color="tab:gray", lw=0.8, ls="--", label="reject")
+        ax.set_ylabel(name)
+        ax.legend(loc="upper right")
+    axes[-1].set_xlabel("time [s]")
+    return _save(fig, path)
+
+
+def contact_sheet(
+    images: Sequence[tuple[str, Path]], path: Path, max_images: int = 48, columns: int = 8, thumb_width: int = 200
+) -> Path:
+    """A JPEG grid of up to `max_images` labelled thumbnails, evenly sampled from `images`."""
+    if len(images) > max_images:
+        images = [images[k] for k in np.linspace(0, len(images) - 1, max_images).round().astype(int)]
+    thumbs = []
+    for label, image_path in images:
+        image = cv2.imread(str(image_path), cv2.IMREAD_REDUCED_COLOR_4)
+        if image is None:
+            raise OSError(f"cannot read {image_path}")
+        h, w = image.shape[:2]
+        thumb = cv2.resize(image, (thumb_width, round(h * thumb_width / w)), interpolation=cv2.INTER_AREA)
+        cv2.putText(thumb, label, (4, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+        thumbs.append(thumb)
+    th = max(t.shape[0] for t in thumbs)
+    thumbs = [cv2.copyMakeBorder(t, 0, th - t.shape[0], 0, 0, cv2.BORDER_CONSTANT) for t in thumbs]
+    thumbs += [np.zeros_like(thumbs[0])] * (-len(thumbs) % columns)
+    rows = [np.hstack(thumbs[r : r + columns]) for r in range(0, len(thumbs), columns)]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(path), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85]):
+        raise OSError(f"failed to write {path}")
+    return path

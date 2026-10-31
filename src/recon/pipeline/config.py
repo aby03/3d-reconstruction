@@ -65,11 +65,20 @@ def parse_override(text: str) -> dict:
     return tree
 
 
-def _validate_section(name: str, cls: type, data: Any) -> Any:
+def _check_keys(name: str, cls: type, data: Any) -> None:
+    """Unknown keys are errors, also inside nested option dataclasses (pydantic ignores them on dataclasses)."""
     if not isinstance(data, dict):
         raise ConfigError(f"{name}: expected a mapping, got {data!r}")
-    if unknown := sorted(set(data) - {f.name for f in dataclasses.fields(cls)}):
+    fields = {f.name: f.type for f in dataclasses.fields(cls)}
+    if unknown := sorted(set(data) - set(fields)):
         raise ConfigError(f"unknown config key(s): {', '.join(f'{name}.{k}' for k in unknown)}")
+    for key, value in data.items():
+        if dataclasses.is_dataclass(fields[key]):
+            _check_keys(f"{name}.{key}", fields[key], value)
+
+
+def _validate_section(name: str, cls: type, data: Any) -> Any:
+    _check_keys(name, cls, data)
     try:
         return TypeAdapter(cls).validate_python(data)
     except ValidationError as e:

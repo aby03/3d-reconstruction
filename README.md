@@ -102,14 +102,15 @@ Needs a finished ingest of the same capture (`recon ingest` first, or use `recon
 pixi run recon keyframes --input data/room2_tiny
 pixi run recon keyframes --input data/room2_tiny --uniform-fps 2    # same as --set keyframes.uniform_fps=2
 ```
-Same as `recon run --only keyframes`. Selects keyframes uniformly in time, writes them as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. `--force` re-runs it even if it is up to date.
+Same as `recon run --only keyframes`. Scores every frame for blur, exposure, texture and rotation speed (`frame_scores.csv`), rejects bad frames, picks the best frame around each uniform tick, writes the keyframes as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. `--force` re-runs it even if it is up to date. Reject thresholds and score weights are `keyframes.reject.*` and `keyframes.weights.*`.
 
 Results to look at:
 ```bash
 D=outputs/room2_tiny/sequences/room2_tiny_20261021_211400/02_keyframes
 cat $D/stage_manifest.json $D/reports/selection_report.json
-head $D/keyframes.csv $D/priors/gravity_cam.csv $D/priors/relative_rotations.csv
+head $D/keyframes.csv $D/frame_scores.csv $D/priors/gravity_cam.csv $D/priors/relative_rotations.csv
 ls $D/images/cam0/          # <frame idx>.jpg
+ls $D/reports/plots/        # scores_timeline.png, keyframe_strip.jpg (contact sheet)
 ```
 
 ### Tests

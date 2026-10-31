@@ -10,10 +10,12 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from recon.io.tables import read_csv, read_json
+from recon.keyframes.metrics import METRIC_COLUMNS, SCORE_COLUMNS, sharpness, to_gray
 from recon.keyframes.priors import cam_rotation_from_device
 from recon.pipeline.cli import main
 from recon.pipeline.config import DEFAULT_CONFIG, SECTIONS, ConfigError, PipelineConfig, load_config
 from recon.pipeline.run_dir import manifest_hash, read_manifest
+from recon.pipeline.stages.common import open_loader
 from recon.pipeline.stages.s02_keyframes import (
     ARTIFACTS,
     GRAVITY_COLUMNS,
@@ -52,16 +54,45 @@ def test_manifest_and_report(keyframes):
     report = read_json(out / ARTIFACTS["selection_report"])
     assert report["num_frames"] == 300 and report["num_keyframes"] == 15
     assert report["method"] == "uniform" and report["imu_used"]
-    assert report["max_gap_s"] <= 0.4
+    assert report["max_gap_s"] <= 0.7
+    assert sum(report["num_rejected_by_reason"].values()) == manifest.metrics["num_rejected"]
+    assert report["mean_sharp_rel_selected"] >= report["mean_sharp_rel_all"]
 
 
 def test_uniform_selection(table):
     assert len(table) == 15
     assert np.all(np.diff(table["idx"]) > 0)
     assert np.all(np.diff(table["t_ns"]) > 0)
-    assert np.isnan(table["gap_s"].iloc[0]) and (table["gap_s"].iloc[1:] <= 0.4).all()
-    assert (table["trigger"] == "uniform").all()
-    assert table["quality"].isna().all() and table["sharp_rel"].isna().all()
+    # one keyframe within half a tick of each tick, so neighbours are less than two ticks apart
+    assert np.isnan(table["gap_s"].iloc[0]) and (table["gap_s"].iloc[1:] < 2 / 3).all()
+    assert set(table["trigger"]) <= {"uniform", "forced"}
+    assert table["quality"].notna().all() and table["sharp_rel"].notna().all()
+
+
+@pytest.fixture(scope="module")
+def scores(out):
+    return read_csv(out / ARTIFACTS["frame_scores"], SCORE_COLUMNS)
+
+
+def test_frame_scores(scores):
+    assert len(scores) == 300 and scores["idx"].tolist() == list(range(300))
+    assert not scores[[*METRIC_COLUMNS, "sharp_rel", "omega_norm", "q"]].isna().any().any()
+    assert scores["rejected_reason"].dropna().isin(["sharp_rel", "clipped", "feat_coverage", "omega_norm"]).all()
+
+
+def test_quality_aware_selection(scores, table):
+    selected = scores.set_index("idx").loc[table["idx"]]
+    assert selected["sharp_rel"].median() >= scores["sharp_rel"].median()
+    assert np.allclose(selected["q"], table["quality"]) and np.allclose(selected["sharp_rel"], table["sharp_rel"])
+    rejected = selected["rejected_reason"].notna().to_numpy()
+    assert (table["trigger"].to_numpy()[rejected] == "forced").all()
+
+
+def test_blur_lowers_sharpness(pipeline_run):
+    loader = open_loader(pipeline_run.sequence_dir(pipeline_run.sequence_ids[0]))
+    for frame in loader.iter_frames(indices=[0, 150, 299], scale=0.5):
+        gray = to_gray(frame.image)
+        assert sharpness(cv2.GaussianBlur(gray, (0, 0), 2.0)) < sharpness(gray)
 
 
 def test_images(out, table):
@@ -148,14 +179,27 @@ def test_changed_key_reruns_only_keyframes(tiny_capture, output_root, keyframes,
 def test_config_errors(tiny_capture, output_root):
     with pytest.raises(ConfigError, match=r"keyframes\.no_such_key"):
         load_config(overrides=["keyframes.no_such_key=1"])
+    with pytest.raises(ConfigError, match=r"keyframes\.reject\.no_such_key"):
+        load_config(overrides=["keyframes.reject.no_such_key=1"])
     with pytest.raises(ConfigError, match=r"keyframes\.uniform_fps"):
         load_config(overrides=["keyframes.uniform_fps=fast"])
     assert _run(tiny_capture, output_root, "--set", "keyframes.no_such_key=1") == 2
 
 
+def _keys(cls, data=None, prefix=""):
+    """Dotted names of the option fields of `cls`, or of the keys of `data` laid over it; nested options recurse."""
+    types = {f.name: f.type for f in dataclasses.fields(cls)}
+    keys = set()
+    for name in types if data is None else data:
+        nested = dataclasses.is_dataclass(types.get(name))
+        sub = None if data is None else data[name]
+        keys |= _keys(types[name], sub, f"{prefix}{name}.") if nested else {prefix + name}
+    return keys
+
+
 def test_default_config_lists_every_key():
     data = yaml.safe_load(DEFAULT_CONFIG.read_text())
-    assert {name: set(data[name]) for name in SECTIONS} == {
-        name: {f.name for f in dataclasses.fields(cls)} for name, cls in SECTIONS.items()
+    assert {name: _keys(cls, data[name]) for name, cls in SECTIONS.items()} == {
+        name: _keys(cls) for name, cls in SECTIONS.items()
     }
     assert load_config() == PipelineConfig()

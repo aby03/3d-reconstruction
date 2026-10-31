@@ -38,11 +38,15 @@ def probe_video(path: Path | str) -> VideoProbe:
         )
 
 
+_CV_ROTATIONS = {0: None, 90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
 def rotate_cw(image: np.ndarray, rotation_deg: int) -> np.ndarray:
     """Rotate an (H, W, ...) image clockwise by a multiple of 90 degrees."""
     if rotation_deg % 90:
         raise ValueError(f"rotation must be a multiple of 90, got {rotation_deg}")
-    return np.ascontiguousarray(np.rot90(image, k=-(rotation_deg // 90)))
+    code = _CV_ROTATIONS[rotation_deg % 360]
+    return np.ascontiguousarray(image) if code is None else cv2.rotate(image, code)
 
 
 def resize(image: np.ndarray, scale: float) -> np.ndarray:
@@ -72,5 +76,6 @@ class VideoReader:
                 if last is not None and idx > last:
                     break
                 if wanted is None or idx in wanted:
-                    image = rotate_cw(frame.to_ndarray(format="rgb24"), self.rotation_deg)
-                    yield idx, resize(image, scale)
+                    # resizing first is cheaper and gives the same image: area resampling commutes with 90° turns
+                    image = resize(frame.to_ndarray(format="rgb24"), scale)
+                    yield idx, rotate_cw(image, self.rotation_deg)

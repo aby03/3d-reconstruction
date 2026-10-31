@@ -19,5 +19,16 @@ ingest:
 keyframes:
   method: uniform
   uniform_fps: 3.0
+  analysis_long_side: 960        # quality metrics on frames scaled to this long side
+  reject:                        # hard rejects; a rejected frame is only chosen when its whole window is rejected
+    sharp_rel_min: 0.55          # sharpness / its 2 s rolling median
+    clipped_max: 0.25            # fraction of pixels < 5 or > 250
+    feat_coverage_min: 0.15      # fraction of 8x8 grid cells with >= 5 FAST corners
+    omega_max: 1.5               # rad/s
+  weights:                       # q = sharp*z(log sharp_rel) + features*feat_coverage - omega*omega_norm - clipped*max(0, clipped - 0.05)
+    sharp: 1.0
+    features: 0.5
+    omega: 0.7
+    clipped: 1.0
   jpeg_quality: 95
   prior_window: 3                # relative-rotation priors between keyframes up to this many apart
