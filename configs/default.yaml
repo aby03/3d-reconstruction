@@ -4,10 +4,15 @@ run:
   output_root: outputs
   seed: 0
 
+device:
+  preference: auto               # auto (CUDA where available, else CPU) | cuda (error if unavailable) | cpu
+  gpu_index: 0
+
 loader:
   allow_mismatch: false          # truncate video frames and timestamps to the shorter instead of failing
   verify_reference_jpegs: true   # compare decoded frames with the saved JPEGs on load
   max_reference_checks: null     # null checks every reference JPEG
+  decode_backend: auto           # auto | nvdec | pyav; auto uses NVDEC where available (follows device.preference)
 
 ingest:
   camera_time_offset_ns: 0       # added to frame timestamps to get the sensor-clock query time
@@ -20,6 +25,8 @@ keyframes:
   method: uniform
   uniform_fps: 3.0
   analysis_long_side: 960        # quality metrics on frames scaled to this long side
+  metrics_backend: auto          # auto | torch | numpy; auto uses torch on CUDA where available (follows device.preference)
+  metrics_batch: 32              # frames per GPU batch
   reject:                        # hard rejects; a rejected frame is only chosen when its whole window is rejected
     sharp_rel_min: 0.55          # sharpness / its 2 s rolling median
     clipped_max: 0.25            # fraction of pixels < 5 or > 250

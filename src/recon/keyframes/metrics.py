@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -101,9 +102,71 @@ def gray_metrics(gray: np.ndarray) -> list[float]:
     return [sharpness(gray), tenengrad(gray), *exposure(gray), feat_coverage(gray)]
 
 
-def analyze_frames(frames: Iterable[Frame]) -> pd.DataFrame:
-    """idx plus METRIC_COLUMNS for every frame yielded (frames should already be at analysis resolution)."""
-    rows = [[frame.idx, *gray_metrics(to_gray(frame.image))] for frame in frames]
+class TorchMetrics:
+    """sharpness, tenengrad, brightness and clipped of a batch of equally sized gray frames on a torch device.
+
+    Same kernels and border handling (reflect-101) as the OpenCV functions above.
+    """
+
+    def __init__(self, device: str = "cuda:0", threshold: float = TENENGRAD_THRESHOLD):
+        import torch
+
+        self.torch = torch
+        self.device = torch.device(device)
+        self.threshold2 = threshold * threshold
+        laplacian = [[0, 1, 0], [1, -4, 1], [0, 1, 0]]
+        sobel_x = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+        sobel_y = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+        self.kernels = torch.tensor([laplacian, sobel_x, sobel_y], dtype=torch.float32, device=self.device)[:, None]
+
+    def __call__(self, grays: Sequence[np.ndarray]) -> np.ndarray:
+        """(B, 4) float64 rows of sharpness, tenengrad, brightness, clipped."""
+        torch, F = self.torch, self.torch.nn.functional
+        with torch.inference_mode():
+            g = torch.from_numpy(np.stack(grays)).to(self.device)
+            x = g[:, None].float()
+            lap, gx, gy = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), self.kernels).unbind(1)
+            h, w = g.shape[1:]
+            dy, dx = round(h * (1 - CENTER_CROP) / 2), round(w * (1 - CENTER_CROP) / 2)
+            sharp = lap[:, dy : h - dy, dx : w - dx].flatten(1).double().var(dim=1, unbiased=False)
+            g2 = gx * gx + gy * gy
+            ten = torch.where(g2 >= self.threshold2, g2, 0.0).flatten(1).double().mean(dim=1)
+            bright = g.flatten(1).double().mean(dim=1)
+            clipped = ((g < DARK) | (g > BRIGHT)).flatten(1).double().mean(dim=1)
+            return torch.stack([sharp, ten, bright, clipped], dim=1).cpu().numpy()
+
+
+def analyze_frames(
+    frames: Iterable[Frame], backend: Literal["numpy", "torch"] = "numpy", batch: int = 32, device: str = "cuda:0"
+) -> pd.DataFrame:
+    """idx plus METRIC_COLUMNS for every frame yielded (frames should already be at analysis resolution).
+
+    The torch backend computes the filter metrics in batches of `batch` frames on `device`; FAST corners always
+    run on the CPU.
+    """
+    if backend == "numpy":
+        rows = [[frame.idx, *gray_metrics(to_gray(frame.image))] for frame in frames]
+        return pd.DataFrame(rows, columns=["idx", *METRIC_COLUMNS]).astype({"idx": np.int64})
+
+    metrics = TorchMetrics(device)
+    rows, grays, pending = [], [], []
+
+    def flush() -> None:
+        for (idx, coverage), values in zip(pending, metrics(grays)):
+            rows.append([idx, *values, coverage])
+        grays.clear()
+        pending.clear()
+
+    for frame in frames:
+        gray = to_gray(frame.image)
+        if grays and gray.shape != grays[0].shape:
+            flush()
+        grays.append(gray)
+        pending.append((frame.idx, feat_coverage(gray)))
+        if len(grays) >= batch:
+            flush()
+    if grays:
+        flush()
     return pd.DataFrame(rows, columns=["idx", *METRIC_COLUMNS]).astype({"idx": np.int64})
 
 

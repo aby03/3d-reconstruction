@@ -139,7 +139,13 @@ def _run_stage(stage: Stage, config_hash: str, upstream: dict[str, str]) -> Stag
     except Exception as e:
         tail = "".join(traceback.format_exc().splitlines(keepends=True)[-TRACEBACK_LINES:])
         return manifest("failed", warnings=[f"{type(e).__name__}: {e}"], error=tail)
-    return manifest("success", artifacts=output.artifacts, metrics=output.metrics, warnings=output.warnings)
+    return manifest(
+        "success",
+        artifacts=output.artifacts,
+        metrics=output.metrics,
+        warnings=output.warnings,
+        backends=output.backends,
+    )
 
 
 def _check_requirements(stage: Stage, selected: set[str]) -> None:

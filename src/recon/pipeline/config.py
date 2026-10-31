@@ -14,6 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 from recon.capture.open_camera_sensors import LoaderOptions
 from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
+from recon.pipeline.device import DeviceOptions
 from recon.sensors.sync import SyncOptions
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
@@ -32,6 +33,7 @@ class RunOptions:
 @dataclass(slots=True)
 class PipelineConfig:
     run: RunOptions = field(default_factory=RunOptions)
+    device: DeviceOptions = field(default_factory=DeviceOptions)
     loader: LoaderOptions = field(default_factory=LoaderOptions)
     ingest: SyncOptions = field(default_factory=SyncOptions)
     keyframes: KeyframeOptions = field(default_factory=KeyframeOptions)

@@ -13,6 +13,8 @@ class KeyframeOptions:
     method: Literal["uniform"] = "uniform"
     uniform_fps: float = 3.0
     analysis_long_side: int = 960  # quality metrics are computed on frames scaled to this long side
+    metrics_backend: Literal["auto", "torch", "numpy"] = "auto"  # torch: filter metrics on the GPU
+    metrics_batch: int = 32  # frames per GPU batch
     reject: RejectOptions = field(default_factory=RejectOptions)
     weights: WeightOptions = field(default_factory=WeightOptions)
     jpeg_quality: int = 95

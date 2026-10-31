@@ -14,6 +14,7 @@ from recon.keyframes.metrics import METRIC_COLUMNS, SCORE_COLUMNS, sharpness, to
 from recon.keyframes.priors import cam_rotation_from_device
 from recon.pipeline.cli import main
 from recon.pipeline.config import DEFAULT_CONFIG, SECTIONS, ConfigError, PipelineConfig, load_config
+from recon.pipeline.device import probe_device
 from recon.pipeline.run_dir import manifest_hash, read_manifest
 from recon.pipeline.stages.common import open_loader
 from recon.pipeline.stages.s02_keyframes import (
@@ -122,6 +123,22 @@ def test_relative_rotation_priors(out, table):
     names = table["image_name"].tolist()
     for i, j, k in zip(names, names[1:], names[2:]):
         assert np.degrees((R[i, k].inv() * R[j, k] * R[i, j]).magnitude()) < 0.5
+
+
+def test_backends_follow_device_probe(keyframes):
+    manifest, out = keyframes
+    info = probe_device()
+    expected = {
+        "decode": "nvdec" if info.has("decode") else "pyav",
+        "metrics": "torch" if info.has("metrics") else "numpy",
+    }
+    assert manifest.backends == expected
+    assert read_json(out / ARTIFACTS["selection_report"])["backend"] == expected
+
+
+def test_doctor(capsys):
+    assert main(["doctor"]) == 0
+    assert "cuda_available" in capsys.readouterr().out
 
 
 def test_cam_rotation_convention():

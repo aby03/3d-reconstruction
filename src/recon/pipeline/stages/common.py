@@ -1,6 +1,7 @@
 """Helpers shared by stage adapters for reading upstream artifacts."""
 
 from pathlib import Path
+from typing import Literal
 
 from recon.capture.base import BaseCaptureLoader
 from recon.capture.open_camera_sensors import SENSOR_UNITS, SOURCE_TYPE, LoaderOptions, OpenCameraSensorsLoader
@@ -11,12 +12,15 @@ from recon.pipeline.run_dir import stage_dir
 from recon.pipeline.stages import s01_ingest
 
 
-def open_loader(sequence_dir: Path) -> BaseCaptureLoader:
+def open_loader(
+    sequence_dir: Path, decode_backend: Literal["nvdec", "pyav"] = "pyav", gpu_index: int = 0
+) -> BaseCaptureLoader:
     """The loader of the capture that `01_ingest/sequence.json` came from, for decoding its frames again."""
     info = read_json(stage_dir(sequence_dir, s01_ingest.DIR_NAME) / s01_ingest.ARTIFACTS["sequence"])
     if info["source_type"] != SOURCE_TYPE:
         raise ValueError(f"unsupported source type {info['source_type']!r}")
-    return OpenCameraSensorsLoader(info["root"], LoaderOptions(verify_reference_jpegs=False))
+    options = LoaderOptions(verify_reference_jpegs=False, decode_backend=decode_backend)
+    return OpenCameraSensorsLoader(info["root"], options, gpu_index)
 
 
 def read_sensor_stream(sequence_dir: Path, kind: SensorKind) -> SensorStream:

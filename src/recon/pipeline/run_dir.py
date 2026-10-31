@@ -58,6 +58,7 @@ class StageManifest:
     config_hash: str = ""
     upstream: dict[str, str] = field(default_factory=dict)  # upstream stage -> sha1 of its manifest file
     error: str | None = None  # traceback tail of a failed stage
+    backends: dict[str, str] = field(default_factory=dict)  # operation -> backend that ran it
 
 
 def write_manifest(manifest: StageManifest, stage_path: Path) -> Path:

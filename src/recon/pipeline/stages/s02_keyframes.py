@@ -2,7 +2,9 @@
 
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -41,6 +43,21 @@ ARTIFACTS = {
 }
 
 
+@dataclass(slots=True)
+class Backends:
+    decode: Literal["nvdec", "pyav"] = "pyav"  # analysis pass decode
+    metrics: Literal["torch", "numpy"] = "numpy"
+    gpu_index: int = 0
+
+    @property
+    def torch_device(self) -> str:
+        return f"cuda:{self.gpu_index}"
+
+
+# per-operation setting -> device preference
+_PREFERENCE = {"auto": "auto", "nvdec": "cuda", "torch": "cuda", "pyav": "cpu", "numpy": "cpu"}
+
+
 def image_name(sequence_id: str, idx: int, camera_id: str = CAMERA_ID) -> str:
     """Scene-wide key of a keyframe image; the file is `images/<camera_id>/<idx:06d>.jpg` in this stage dir."""
     return f"{sequence_id}/{camera_id}/{idx:06d}.jpg"
@@ -66,11 +83,14 @@ def _keyframes_table(scores: pd.DataFrame, selection: Selection, names: dict[int
     )
 
 
-def _analyze(loader: BaseCaptureLoader, frames: pd.DataFrame, options: KeyframeOptions) -> pd.DataFrame:
+def _analyze(
+    loader: BaseCaptureLoader, frames: pd.DataFrame, options: KeyframeOptions, backends: Backends
+) -> pd.DataFrame:
     """Pass A: quality metrics of every frame at analysis resolution, joined with omega_norm and scored."""
     camera = loader.load().cameras[CAMERA_ID]
     scale = analysis_scale(camera.upright_size, options.analysis_long_side)
-    metrics = analyze_frames(loader.iter_frames(CAMERA_ID, scale=scale))
+    frames_iter = loader.iter_frames(CAMERA_ID, scale=scale)
+    metrics = analyze_frames(frames_iter, backends.metrics, options.metrics_batch, backends.torch_device)
     t_ns, omega_norm = frames["t_ns"].to_numpy(), frames["omega_norm"].to_numpy()
     return score_frames(metrics, t_ns, omega_norm, options.reject, options.weights)
 
@@ -96,9 +116,12 @@ def _write_plots(out: Path, scores: pd.DataFrame, keyframes: pd.DataFrame, optio
     plots.contact_sheet(sheet, out / ARTIFACTS["plot_keyframes"])
 
 
-def run_keyframes(sequence_dir: Path, out: Path, options: KeyframeOptions | None = None) -> StageOutput:
+def run_keyframes(
+    sequence_dir: Path, out: Path, options: KeyframeOptions | None = None, backends: Backends | None = None
+) -> StageOutput:
     """Run step 2 on the ingested sequence in `sequence_dir`, writing into the existing stage dir `out`."""
     options = options or KeyframeOptions()
+    backends = backends or Backends()
     ingest = stage_dir(sequence_dir, s01_ingest.DIR_NAME)
     t_start = time.perf_counter()
 
@@ -109,8 +132,8 @@ def run_keyframes(sequence_dir: Path, out: Path, options: KeyframeOptions | None
     sequence_id = info["sequence_id"]
     timings = {}
 
-    loader = open_loader(sequence_dir)
-    scores = _analyze(loader, frames, options)
+    # the analysis pass decodes every frame (NVDEC pays off); extraction decodes few at full size, PyAV is faster
+    scores = _analyze(open_loader(sequence_dir, backends.decode, backends.gpu_index), frames, options, backends)
     write_csv(scores, out / ARTIFACTS["frame_scores"], SCORE_COLUMNS)
     timings["pass_a"] = time.perf_counter() - t_start
     rejected = scores["rejected_reason"].ne("").to_numpy()
@@ -124,6 +147,7 @@ def run_keyframes(sequence_dir: Path, out: Path, options: KeyframeOptions | None
     log.info("selected %d of %d frames at %.3g fps", len(indices), len(frames), options.uniform_fps)
 
     t0 = time.perf_counter()
+    loader = open_loader(sequence_dir)
     paths = loader.extract_frames(indices, out / ARTIFACTS["images"], CAMERA_ID, options.jpeg_quality)
     if len(paths) != len(indices):
         raise RuntimeError(f"extracted {len(paths)} of {len(indices)} keyframes")
@@ -170,6 +194,7 @@ def run_keyframes(sequence_dir: Path, out: Path, options: KeyframeOptions | None
         "median_gap_s": float(gaps.median()) if len(gaps) else None,
         "max_gap_s": float(gaps.max()) if len(gaps) else None,
         "imu_used": imu_used,
+        "backend": {"decode": backends.decode, "metrics": backends.metrics},
         "timings": {k: round(v, 3) for k, v in timings.items()},
     }
     write_json(report, out / ARTIFACTS["selection_report"])
@@ -185,6 +210,7 @@ def run_keyframes(sequence_dir: Path, out: Path, options: KeyframeOptions | None
             "extract_s": report["timings"]["extract"],
         },
         warnings=warnings,
+        backends=report["backend"],
     )
 
 
@@ -196,8 +222,19 @@ class KeyframesStage(Stage):
     requires = (s01_ingest.STAGE,)
     config_section = "keyframes"
 
+    def hash_inputs(self) -> dict[str, Any]:
+        # backends change the metrics slightly, so a different device choice re-runs the stage
+        return {"device": self.ctx.config.device, "decode_backend": self.ctx.config.loader.decode_backend}
+
     def run(self) -> StageOutput:
-        return run_keyframes(self.ctx.sequence_dir(self.sequence_id), self.out, self.options)
+        decode = self.ctx.backend("decode", _PREFERENCE[self.ctx.config.loader.decode_backend])
+        metrics = self.ctx.backend("metrics", _PREFERENCE[self.options.metrics_backend])
+        backends = Backends(
+            decode="nvdec" if decode == "cuda" else "pyav",
+            metrics="torch" if metrics == "cuda" else "numpy",
+            gpu_index=self.ctx.config.device.gpu_index,
+        )
+        return run_keyframes(self.ctx.sequence_dir(self.sequence_id), self.out, self.options, backends)
 
     def expected_artifacts(self) -> list[Path]:
         return [self.out / rel for rel in ARTIFACTS.values()]

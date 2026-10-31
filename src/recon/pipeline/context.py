@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from recon.pipeline.config import PipelineConfig
+from recon.pipeline.device import Backend, DeviceInfo, Preference, probe_device, resolve_backend
 from recon.pipeline.run_dir import stage_dir
 
 
@@ -15,10 +16,21 @@ class RunContext:
     inputs: dict[str, Path]  # sequence_id -> capture directory
     config: PipelineConfig
     logger: logging.Logger
+    device: DeviceInfo | None = None  # probed on the first backend() call that needs it
 
     @property
     def sequence_ids(self) -> list[str]:
         return list(self.inputs)
+
+    def backend(self, capability: str, preference: Preference = "auto") -> Backend:
+        """CUDA or CPU for `capability`; an `auto` preference follows `device.preference`."""
+        if preference == "auto":
+            preference = self.config.device.preference
+        if preference == "cpu":
+            return "cpu"
+        if self.device is None:
+            self.device = probe_device(self.config.device.gpu_index)
+        return resolve_backend(capability, preference, self.device)
 
     def sequence_dir(self, sequence_id: str) -> Path:
         return self.scene_dir / "sequences" / sequence_id

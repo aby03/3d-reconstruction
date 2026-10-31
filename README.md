@@ -73,7 +73,14 @@ Per-sequence stages write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default, one section per step (`run`, `loader`, `ingest`, `keyframes`). Unknown keys and wrong types are errors that name the full key path.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`). Unknown keys and wrong types are errors that name the full key path.
+
+**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`). Each stage manifest records the backends it used under `backends`.
+
+### Check the machine
+```bash
+pixi run recon doctor        # GPU, which operations can use CUDA, versions of Python packages and tools
+```
 
 ### Inspect a capture (writes nothing)
 Loads the capture, checks frame timing, sensor streams and reference JPEGs, syncs the sensors to the frames and prints a summary.

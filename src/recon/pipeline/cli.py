@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from dataclasses import asdict
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from recon.capture.open_camera_sensors import OpenCameraSensorsLoader
 from recon.io.tables import to_jsonable
 from recon.pipeline.config import ConfigError, PipelineConfig, load_config
+from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, tool_versions
 from recon.pipeline.run_dir import read_manifest, setup_logging
 from recon.pipeline.runner import PipelineError, open_run, run_stages, select_stages
 from recon.pipeline.stage import registered_stages
@@ -30,11 +32,17 @@ def _format(value: Any) -> str:
     return str(value)
 
 
-def _print_report(report: dict) -> None:
-    rows = [(k, _format(v)) for k, v in _flatten(to_jsonable({k: v for k, v in report.items() if k != "warnings"}))]
+def _print_table(values: dict) -> int:
+    """Print flattened key/value rows; returns the key column width."""
+    rows = [(k, _format(v)) for k, v in _flatten(to_jsonable(values))]
     width = max(len(k) for k, _ in rows)
     for k, v in rows:
         print(f"  {k:<{width}}  {v}")
+    return width
+
+
+def _print_report(report: dict) -> None:
+    width = _print_table({k: v for k, v in report.items() if k != "warnings"})
     warnings = report.get("warnings", [])
     print(f"  {'warnings':<{width}}  {len(warnings)}")
     for w in warnings:
@@ -94,6 +102,20 @@ def cmd_list_stages(args: argparse.Namespace) -> int:
     for cls in registered_stages():
         requires = ", ".join(cls.requires) or "-"
         print(f"  {cls.name:<12} {cls.dir_name:<14} {cls.scope:<9} {cls.config_section:<10} requires: {requires}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    info = probe_device(args.gpu_index)
+    versions = tool_versions()
+    print("device:")
+    _print_table(asdict(info))
+    print("backends (device.preference=auto):")
+    _print_table({cap: resolve_backend(cap, "auto", info) for cap in CAPABILITIES})
+    print("versions:")
+    _print_table({name: version or "MISSING" for name, version in versions.items()})
+    if missing := [name for name, version in versions.items() if version is None]:
+        print(f"missing: {', '.join(missing)}")
     return 0
 
 
@@ -168,6 +190,10 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = commands.add_parser("inspect", help="load and check a capture, print a summary; writes nothing")
     _add_capture_args(inspect)
     inspect.set_defaults(func=cmd_inspect)
+
+    doctor = commands.add_parser("doctor", help="print the GPU, which operations can use CUDA, and tool versions")
+    doctor.add_argument("--gpu-index", type=int, default=0, help="GPU to probe (default: 0)")
+    doctor.set_defaults(func=cmd_doctor)
 
     list_stages = commands.add_parser("list-stages", help="print the stages in pipeline order")
     list_stages.set_defaults(func=cmd_list_stages)

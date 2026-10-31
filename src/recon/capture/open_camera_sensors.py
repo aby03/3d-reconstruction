@@ -12,6 +12,7 @@ import re
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -26,7 +27,7 @@ from recon.core.frames import (
     device_orientation_from_gravity,
 )
 from recon.core.types import CameraSensorExtrinsics, CaptureSequence, Frame, SensorKind, SensorStream, VideoStream
-from recon.io.video import VideoReader, probe_video
+from recon.io.video import NvdecVideoReader, VideoReader, probe_video
 from recon.sensors.streams import clean_stream, stream_stats
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,8 @@ class LoaderOptions:
     allow_mismatch: bool = False  # truncate video frames and timestamps to the shorter instead of failing
     verify_reference_jpegs: bool = True  # compare decoded frames with the saved JPEGs on load
     max_reference_checks: int | None = None  # None checks every reference JPEG
+    # nvdec: ffmpeg + NVDEC on the GPU; auto is resolved by the pipeline (nvdec where available), else PyAV
+    decode_backend: Literal["auto", "nvdec", "pyav"] = "auto"
 
 
 @dataclass(slots=True)
@@ -137,9 +140,10 @@ def read_sensor_csv(path: Path | str, kind: SensorKind) -> SensorStream:
 class OpenCameraSensorsLoader(BaseCaptureLoader):
     name = SOURCE_TYPE
 
-    def __init__(self, root: Path | str, options: LoaderOptions | None = None):
+    def __init__(self, root: Path | str, options: LoaderOptions | None = None, gpu_index: int = 0):
         self.root = Path(root)
         self.options = options or LoaderOptions()
+        self.gpu_index = gpu_index  # GPU for nvdec decoding
         self.sequence: CaptureSequence | None = None
 
     @classmethod
@@ -261,6 +265,11 @@ class OpenCameraSensorsLoader(BaseCaptureLoader):
             indices = sorted(set(indices))
             if indices and (indices[0] < 0 or indices[-1] >= n):
                 raise IndexError(f"frame indices must be in [0, {n}), got {indices[0]}..{indices[-1]}")
-        reader = VideoReader(camera.path, camera.rotation_deg)
+        if self.options.decode_backend == "nvdec":
+            reader = NvdecVideoReader(
+                camera.path, camera.rotation_deg, camera.stored_size, camera.codec, self.gpu_index
+            )
+        else:
+            reader = VideoReader(camera.path, camera.rotation_deg)
         for idx, image in reader.iter_frames(indices, scale):
             yield Frame(camera_id=camera_id, idx=idx, t_ns=int(camera.frame_t_ns[idx]), image=image)
