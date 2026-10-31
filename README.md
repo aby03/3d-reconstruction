@@ -55,11 +55,15 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes)
+pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm)
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`). A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`.
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+```bash
+pixi run recon run --input data/room2_tiny --resume                    # the latest run
+pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
+```
 
 | Option | Meaning |
 |---|---|
@@ -69,13 +73,14 @@ Per-sequence stages write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>
 | `--from STAGE` / `--to STAGE` | first / last stage to run |
 | `--only STAGE` | run just this stage; its upstream stages must already be done |
 | `--force STAGE` | re-run this stage and every stage after it |
+| `--resume [RUN_ID]` | continue in that run dir (no id: the latest run) instead of a new one; it must be a run of the same capture |
 | `--config FILE` | YAML file layered on `configs/default.yaml` (repeatable) |
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`). Unknown keys and wrong types are errors that name the full key path.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`). Unknown keys and wrong types are errors that name the full key path.
 
-**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`). Each stage manifest records the backends it used under `backends`.
+**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) follows `device.preference`. Each stage manifest records the backends it used under `backends`.
 
 ### Check the machine
 ```bash
@@ -119,6 +124,23 @@ head $D/keyframes.csv $D/frame_scores.csv $D/priors/gravity_cam.csv $D/priors/re
 ls $D/images/cam0/          # <frame idx>.jpg
 ls $D/reports/plots/        # scores_timeline.png (scores, flow, tracks; keyframes in red), keyframe_strip.jpg
 ```
+
+### Step 3: sfm
+Needs finished keyframes (`recon keyframes` first, or use `recon run`).
+```bash
+pixi run recon sfm --input data/room2_tiny
+pixi run recon sfm --input data/room2_tiny --set sfm.matching.strategy=sequential --force
+```
+Same as `recon run --only sfm --resume`: it continues in the latest run of the scene (or starts a new run when there is none), so a finished SfM is kept; `--resume RUN_ID` picks another run and `--force` re-runs it. It extracts SIFT features of every keyframe (GPU), matches them (`sfm.matching.strategy`: `auto` matches every pair up to 200 keyframes and each keyframe with its 20 successors beyond that) and runs COLMAP's global mapper. The result is one COLMAP model with a `SIMPLE_RADIAL` camera per sequence, written to `outputs/room2_tiny/runs/<run_id>/03_sfm/`. COLMAP's own log goes to `runs/<run_id>/logs/sfm/colmap.log.<timestamp>`. Keys: `sfm.initial_camera_model`, `sfm.features.*` (`max_num_features`, `max_image_size`, `domain_size_pooling`), `sfm.matching.*` (`strategy`, `exhaustive_max_images`, `overlap`, `quadratic_overlap`, `min_num_inliers`, `max_num_matches`), `sfm.mapper.backend`.
+
+Results to look at:
+```bash
+D=$(ls -d outputs/room2_tiny/runs/*/03_sfm | tail -1)
+cat $D/stage_manifest.json $D/reports/sfm_report.json $D/intrinsics.json
+ls $D/sparse/raw $D/reports/plots/   # COLMAP model; track_len_hist, reproj_hist, trajectory_topdown
+pixi run colmap gui --database_path $D/database.db --image_path $D/images --import_path $D/sparse/raw
+```
+`sparse_points.ply` holds the coloured sparse points; `images/` holds one symlink per sequence to its keyframe images (the COLMAP image root).
 
 ### Tests
 ```bash

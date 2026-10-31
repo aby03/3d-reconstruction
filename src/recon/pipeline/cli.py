@@ -11,10 +11,10 @@ from recon.capture.open_camera_sensors import OpenCameraSensorsLoader
 from recon.io.tables import to_jsonable
 from recon.pipeline.config import ConfigError, PipelineConfig, load_config
 from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, tool_versions
-from recon.pipeline.run_dir import read_manifest, setup_logging
-from recon.pipeline.runner import PipelineError, open_run, run_stages, select_stages
-from recon.pipeline.stage import registered_stages
-from recon.pipeline.stages import s01_ingest, s02_keyframes
+from recon.pipeline.run_dir import latest_run_dir, read_manifest, setup_logging
+from recon.pipeline.runner import PipelineError, open_run, run_stages, scene_path, select_stages
+from recon.pipeline.stage import get_stage, registered_stages
+from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm
 from recon.sensors.sync import synchronize
 
 
@@ -68,10 +68,17 @@ def _config(args: argparse.Namespace) -> PipelineConfig:
     return load_config(args.config, _overrides(args))
 
 
-def _run(args: argparse.Namespace, from_: str | None, to: str | None, only: str | None, force: str | None) -> int:
+def _run(
+    args: argparse.Namespace,
+    from_: str | None,
+    to: str | None,
+    only: str | None,
+    force: str | None,
+    resume: str | None = None,
+) -> int:
     config = _config(args)
     stages = select_stages(from_, to, only)
-    ctx = open_run(args.input, config, args.scene)
+    ctx = open_run(args.input, config, args.scene, resume)
     try:
         result = run_stages(ctx, stages, force)
     except KeyboardInterrupt:
@@ -91,11 +98,15 @@ def _run(args: argparse.Namespace, from_: str | None, to: str | None, only: str 
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    return _run(args, args.from_, args.to, args.only, args.force)
+    return _run(args, args.from_, args.to, args.only, args.force, args.resume)
 
 
 def cmd_stage(args: argparse.Namespace) -> int:
-    return _run(args, None, None, args.stage, args.stage if args.force else None)
+    resume = getattr(args, "resume", None)
+    if resume is None and get_stage(args.stage).scope == "scene":
+        # a scene stage builds on the latest run, so a finished result is kept
+        resume = "latest" if latest_run_dir(scene_path(args.input, _config(args), args.scene)) else None
+    return _run(args, None, None, args.stage, args.stage if args.force else None, resume)
 
 
 def cmd_list_stages(args: argparse.Namespace) -> int:
@@ -155,6 +166,16 @@ def _add_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-root", type=Path, help="same as --set run.output_root=DIR (default: outputs)")
 
 
+def _add_resume_arg(parser: argparse.ArgumentParser, default: str) -> None:
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        metavar="RUN_ID",
+        help=f"continue in this run dir (no RUN_ID: the latest), keeping its up-to-date scene stages ({default})",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="recon", description="Phone video + IMU to a textured room mesh.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -167,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--to", choices=names, metavar="STAGE", help="last stage to run")
     run.add_argument("--only", choices=names, metavar="STAGE", help="run just this stage")
     run.add_argument("--force", choices=names, metavar="STAGE", help="re-run this stage and everything after it")
+    _add_resume_arg(run, "new run unless given")
     run.set_defaults(func=cmd_run)
 
     ingest = commands.add_parser(
@@ -188,6 +210,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     keyframes.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
     keyframes.set_defaults(func=cmd_stage, stage=s02_keyframes.STAGE)
+
+    sfm = commands.add_parser(
+        "sfm", help="SIFT features, matching and global mapping of the keyframes; 03_sfm/ (run --only sfm --resume)"
+    )
+    sfm.add_argument("--input", required=True, type=Path, help="capture directory (root or stamp dir)")
+    _add_config_args(sfm)
+    _add_output_args(sfm)
+    sfm.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
+    _add_resume_arg(sfm, "default: the latest run, or a new run when there is none")
+    sfm.set_defaults(func=cmd_stage, stage=s03_sfm.STAGE)
 
     inspect = commands.add_parser("inspect", help="load and check a capture, print a summary; writes nothing")
     _add_capture_args(inspect)

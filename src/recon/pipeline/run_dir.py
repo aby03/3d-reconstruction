@@ -37,6 +37,13 @@ def new_run_dir(scene_path: Path) -> Path:
     raise RuntimeError(f"too many runs started at {base} in {runs}")
 
 
+def latest_run_dir(scene_path: Path) -> Path | None:
+    """The newest `<scene>/runs/<run_id>/` that has a run manifest, None when there is none."""
+    runs = scene_path / "runs"
+    found = sorted(p for p in runs.iterdir() if (p / RUN_MANIFEST_NAME).is_file()) if runs.is_dir() else []
+    return found[-1] if found else None
+
+
 def stage_dir(parent: Path, dir_name: str) -> Path:
     return parent / dir_name
 

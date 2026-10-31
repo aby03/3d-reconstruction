@@ -31,3 +31,13 @@ def pipeline_run(tiny_capture, output_root) -> RunContext:
     result = run_stages(ctx, select_stages(to="keyframes"))
     assert result.status == "success", result.error
     return ctx
+
+
+@pytest.fixture(scope="session")
+def sfm_run(pipeline_run) -> Path:
+    """sfm on the keyframes of `pipeline_run`, once per session; returns its stage dir."""
+    from recon.pipeline.stages.s03_sfm import SfmStage
+
+    result = run_stages(pipeline_run, [SfmStage])
+    assert result.status == "success", result.error
+    return pipeline_run.stage_dir("sfm")

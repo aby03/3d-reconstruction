@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from recon.capture.open_camera_sensors import discover_files
-from recon.io.tables import write_json
+from recon.io.tables import read_json, write_json
 from recon.pipeline.config import PipelineConfig, dump_config
 from recon.pipeline.context import RunContext
 from recon.pipeline.run_dir import (
     RUN_MANIFEST_NAME,
     StageManifest,
+    latest_run_dir,
     manifest_hash,
     new_run_dir,
     now_iso,
@@ -65,20 +66,41 @@ def select_stages(from_: str | None = None, to: str | None = None, only: str | N
     return stages[start:stop]
 
 
-def open_run(input_dir: Path | str, config: PipelineConfig, scene: str | None = None) -> RunContext:
-    """Create a run dir for one capture under `<output_root>/<scene>/` and log to its `logs/pipeline.log`."""
+def scene_path(input_dir: Path | str, config: PipelineConfig, scene: str | None = None) -> Path:
+    """`<output_root>/<scene>/` of a capture; the scene defaults to the capture folder name."""
+    return scene_dir(config.run.output_root, scene or discover_files(input_dir).root.name)
+
+
+def _resumed_run_dir(scene_root: Path, resume: str, inputs: dict[str, Path]) -> Path:
+    run_path = latest_run_dir(scene_root) if resume == "latest" else scene_root / "runs" / resume
+    if run_path is None or not (run_path / RUN_MANIFEST_NAME).is_file():
+        what = "no run" if resume == "latest" else f"no run {resume!r}"
+        raise PipelineError(f"{what} to resume in {scene_root / 'runs'}")
+    sequences = set(read_json(run_path / RUN_MANIFEST_NAME)["sequences"])
+    if sequences != set(inputs):
+        raise PipelineError(
+            f"run {run_path.name} has sequences {', '.join(sorted(sequences))}, not {', '.join(inputs)}"
+        )
+    return run_path
+
+
+def open_run(
+    input_dir: Path | str, config: PipelineConfig, scene: str | None = None, resume: str | None = None
+) -> RunContext:
+    """Open a run dir for one capture under `<output_root>/<scene>/` and log to its `logs/pipeline.log`.
+
+    Without `resume` the run is new. `resume` (a run id, or "latest" for the newest run) reuses that run dir,
+    so its scene stages can be skipped when up to date; it must have been made for the same sequences.
+    """
     files = discover_files(input_dir)
-    scene_path = scene_dir(config.run.output_root, scene or files.root.name)
-    run_path = new_run_dir(scene_path)
+    scene_root = scene_dir(config.run.output_root, scene or files.root.name)
+    inputs = {files.sequence_id: files.root}
+    run_path = new_run_dir(scene_root) if resume is None else _resumed_run_dir(scene_root, resume, inputs)
     setup_logging(run_path / "logs" / "pipeline.log")
+    if resume is not None:
+        log.info("resuming run %s", run_path.name)
     (run_path / "config.resolved.yaml").write_text(dump_config(config))
-    return RunContext(
-        scene_dir=scene_path,
-        run_dir=run_path,
-        inputs={files.sequence_id: files.root},
-        config=config,
-        logger=log,
-    )
+    return RunContext(scene_dir=scene_root, run_dir=run_path, inputs=inputs, config=config, logger=log)
 
 
 def _upstream_hashes(stage: Stage) -> dict[str, str | None]:

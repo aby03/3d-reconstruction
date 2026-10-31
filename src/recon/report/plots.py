@@ -126,3 +126,50 @@ def contact_sheet(
     if not cv2.imwrite(str(path), np.vstack(rows), [cv2.IMWRITE_JPEG_QUALITY, 85]):
         raise OSError(f"failed to write {path}")
     return path
+
+
+def plot_histogram(values: np.ndarray, path: Path, title: str = "", xlabel: str = "", bins: int | Sequence = 50) -> Path:
+    """Histogram of `values` with its median marked."""
+    values = np.asarray(values)
+    fig = Figure(figsize=(6, 4))
+    ax = fig.subplots()
+    ax.hist(values, bins=bins)
+    if len(values):
+        ax.axvline(np.median(values), color="tab:red", lw=0.8, ls="--", label=f"median {np.median(values):.3g}")
+        ax.legend(loc="upper right")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("count")
+    return _save(fig, path)
+
+
+def plot_trajectory_topdown(
+    centres: np.ndarray, points: np.ndarray, path: Path, max_points: int = 50_000, seed: int = 0
+) -> Path:
+    """Camera centres (in order, coloured by index) over the points, projected onto the two main axes of the centres."""
+    centres, points = np.asarray(centres, dtype=float), np.asarray(points, dtype=float).reshape(-1, 3)
+    mean = centres.mean(axis=0)
+    _, _, axes = np.linalg.svd(centres - mean, full_matrices=False)
+
+    def to_2d(xyz: np.ndarray) -> np.ndarray:
+        return (xyz - mean) @ axes[:2].T
+
+    if len(points) > max_points:
+        points = points[np.random.default_rng(seed).choice(len(points), max_points, replace=False)]
+    fig = Figure(figsize=(8, 8))
+    ax = fig.subplots()
+    if len(points):
+        p2 = to_2d(points)
+        lo, hi = np.percentile(p2, [1, 99], axis=0)
+        p2 = p2[((p2 >= lo) & (p2 <= hi)).all(axis=1)]
+        ax.scatter(p2[:, 0], p2[:, 1], s=0.2, color="tab:gray", alpha=0.4, label="points")
+    c2 = to_2d(centres)
+    ax.plot(c2[:, 0], c2[:, 1], lw=0.6, color="black")
+    sc = ax.scatter(c2[:, 0], c2[:, 1], s=8, c=np.arange(len(c2)), cmap="viridis", label="cameras", zorder=3)
+    ax.plot(*c2[0], "o", ms=8, mfc="none", color="tab:green", label="first")
+    fig.colorbar(sc, ax=ax, label="keyframe")
+    ax.set_aspect("equal")
+    ax.set_xlabel("main axis 1")
+    ax.set_ylabel("main axis 2")
+    ax.legend(loc="upper right")
+    return _save(fig, path)
