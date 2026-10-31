@@ -57,7 +57,7 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 ```bash
 pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes)
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
-pixi run recon run --input data/room2_tiny --set keyframes.uniform_fps=2
+pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
 Per-sequence stages write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`). A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`.
 
@@ -107,9 +107,9 @@ ls $D/reports/plots/        # timeline, sensor_rates, gravity, omega
 Needs a finished ingest of the same capture (`recon ingest` first, or use `recon run`).
 ```bash
 pixi run recon keyframes --input data/room2_tiny
-pixi run recon keyframes --input data/room2_tiny --uniform-fps 2    # same as --set keyframes.uniform_fps=2
+pixi run recon keyframes --input data/room2_tiny --set keyframes.method=uniform --uniform-fps 2   # uniform baseline
 ```
-Same as `recon run --only keyframes`. Scores every frame for blur, exposure, texture and rotation speed (`frame_scores.csv`), rejects bad frames, picks the best frame around each uniform tick, writes the keyframes as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. `--force` re-runs it even if it is up to date. Reject thresholds and score weights are `keyframes.reject.*` and `keyframes.weights.*`.
+Same as `recon run --only keyframes`. Scores every frame for blur, exposure, texture and rotation speed (`frame_scores.csv`), rejects bad frames and picks keyframes: by default (`keyframes.method=adaptive`) a new keyframe is taken when the image has moved enough since the last one (KLT flow, lost tracks) or the gyro has turned 8°, with the thresholds tuned so there are 2.5–7 keyframes per second and never a gap above 1 s; `--set keyframes.method=uniform` instead picks the best frame around each 1/`uniform_fps` tick. It writes the keyframes as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. `--force` re-runs it even if it is up to date. Reject thresholds and score weights are `keyframes.reject.*` and `keyframes.weights.*`.
 
 Results to look at:
 ```bash
@@ -117,7 +117,7 @@ D=outputs/room2_tiny/sequences/room2_tiny_20261021_211400/02_keyframes
 cat $D/stage_manifest.json $D/reports/selection_report.json
 head $D/keyframes.csv $D/frame_scores.csv $D/priors/gravity_cam.csv $D/priors/relative_rotations.csv
 ls $D/images/cam0/          # <frame idx>.jpg
-ls $D/reports/plots/        # scores_timeline.png, keyframe_strip.jpg (contact sheet)
+ls $D/reports/plots/        # scores_timeline.png (scores, flow, tracks; keyframes in red), keyframe_strip.jpg
 ```
 
 ### Tests

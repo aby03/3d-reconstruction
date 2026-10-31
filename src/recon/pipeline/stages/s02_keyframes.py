@@ -2,19 +2,30 @@
 
 import logging
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
+from scipy.spatial.transform import Rotation
 
 from recon.capture.base import BaseCaptureLoader
-from recon.core.types import SensorKind
+from recon.core.types import Frame, SensorKind
 from recon.io.tables import read_csv, read_json, write_csv, write_json
-from recon.keyframes.metrics import REJECT_REASONS, SCORE_COLUMNS, analysis_scale, analyze_frames, score_frames
+from recon.io.video import resize
+from recon.keyframes.metrics import (
+    REJECT_REASONS,
+    SCORE_COLUMNS,
+    analysis_scale,
+    analyze_frames,
+    score_frames,
+    to_gray,
+)
+from recon.keyframes.overlap import KLT_LONG_SIDE
 from recon.keyframes.priors import gravity_priors, relative_rotation_priors
-from recon.keyframes.select import KeyframeOptions, Selection, select_uniform
+from recon.keyframes.select import ADAPTIVE_TRIGGERS, KeyframeOptions, Selection, select_adaptive, select_uniform
 from recon.report import plots
 from recon.pipeline.run_dir import read_manifest, stage_dir
 from recon.pipeline.stage import Stage, StageOutput, register_stage
@@ -28,6 +39,7 @@ STAGE = "keyframes"
 DIR_NAME = "02_keyframes"
 CAMERA_ID = "cam0"
 KEYFRAMES_COLUMNS = ["idx", "t_ns", "image_name", "quality", "sharp_rel", "omega_norm", "trigger", "gap_s"]
+FRAME_SCORES_COLUMNS = [*SCORE_COLUMNS[:-2], "flow_med", "track_ratio", *SCORE_COLUMNS[-2:]]
 GRAVITY_COLUMNS = ["image_name", "gx", "gy", "gz", "conf"]
 ROTATION_COLUMNS = ["image_i", "image_j", "qx", "qy", "qz", "qw", "dt_s"]
 
@@ -83,29 +95,72 @@ def _keyframes_table(scores: pd.DataFrame, selection: Selection, names: dict[int
     )
 
 
+def _keep_tracking_frames(frames: Iterator[Frame], grays: list[np.ndarray | None]) -> Iterator[Frame]:
+    """Pass the frames through, storing each as a gray frame at the KLT tracking resolution in `grays[idx]`."""
+    for frame in frames:
+        gray = to_gray(frame.image)
+        scale = analysis_scale(gray.shape[::-1], KLT_LONG_SIDE)
+        grays[frame.idx] = resize(gray, scale)
+        yield frame
+
+
 def _analyze(
     loader: BaseCaptureLoader, frames: pd.DataFrame, options: KeyframeOptions, backends: Backends
-) -> pd.DataFrame:
-    """Pass A: quality metrics of every frame at analysis resolution, joined with omega_norm and scored."""
+) -> tuple[pd.DataFrame, list[np.ndarray | None]]:
+    """Pass A: quality metrics of every frame at analysis resolution, joined with omega_norm and scored.
+
+    For adaptive selection also the gray tracking frames (None where decoding failed), else an empty list.
+    """
     camera = loader.load().cameras[CAMERA_ID]
     scale = analysis_scale(camera.upright_size, options.analysis_long_side)
     frames_iter = loader.iter_frames(CAMERA_ID, scale=scale)
+    grays: list[np.ndarray | None] = []
+    if options.method == "adaptive":
+        grays = [None] * len(frames)
+        frames_iter = _keep_tracking_frames(frames_iter, grays)
     metrics = analyze_frames(frames_iter, backends.metrics, options.metrics_batch, backends.torch_device)
     t_ns, omega_norm = frames["t_ns"].to_numpy(), frames["omega_norm"].to_numpy()
-    return score_frames(metrics, t_ns, omega_norm, options.reject, options.weights)
+    return score_frames(metrics, t_ns, omega_norm, options.reject, options.weights), grays
+
+
+def _gyro_angle(ingest: Path, ingest_artifacts: dict[str, str]) -> Callable[[int, int], float]:
+    """Rotation angle in degrees between two frames from the chained gyro rotations; NaN without gyro."""
+    if "frame_rotations" not in ingest_artifacts:
+        return lambda i, j: np.nan
+    R_cum = np.load(ingest / s01_ingest.ARTIFACTS["frame_rotations"])["R_cum"]
+    valid = ~np.isnan(R_cum).any(axis=1)
+    rotations = Rotation.from_quat(np.where(valid[:, None], R_cum, [0.0, 0.0, 0.0, 1.0]))
+
+    def angle(i: int, j: int) -> float:
+        return float(np.degrees((rotations[i].inv() * rotations[j]).magnitude())) if valid[i] and valid[j] else np.nan
+
+    return angle
+
+
+def _select(
+    scores: pd.DataFrame, grays: list[np.ndarray | None], angle: Callable[[int, int], float], options: KeyframeOptions
+) -> Selection:
+    t_ns, q = scores["t_ns"].to_numpy(), scores["q"].to_numpy()
+    rejected = scores["rejected_reason"].ne("").to_numpy()
+    if options.method == "uniform":
+        return select_uniform(t_ns, options.uniform_fps, q, rejected)
+    return select_adaptive(t_ns, q, rejected, grays, angle, options)
 
 
 def _write_plots(out: Path, scores: pd.DataFrame, keyframes: pd.DataFrame, options: KeyframeOptions) -> None:
     t0 = scores["t_ns"].iloc[0]
+    names = ["sharp_rel", "omega_norm", "feat_coverage", "q", "flow_med", "track_ratio"]
     plots.plot_scores_timeline(
         (scores["t_ns"].to_numpy() - t0) * 1e-9,
-        {name: scores[name].to_numpy() for name in ("sharp_rel", "omega_norm", "feat_coverage", "q")},
+        {name: scores[name].to_numpy() for name in names if scores[name].notna().any()},
         (keyframes["t_ns"].to_numpy() - t0) * 1e-9,
         out / ARTIFACTS["plot_scores"],
         thresholds={
             "sharp_rel": options.reject.sharp_rel_min,
             "omega_norm": options.reject.omega_max,
             "feat_coverage": options.reject.feat_coverage_min,
+            "flow_med": options.trigger.flow_frac,
+            "track_ratio": options.trigger.track_ratio,
         },
     )
     images = out / ARTIFACTS["images"]
@@ -133,18 +188,30 @@ def run_keyframes(
     timings = {}
 
     # the analysis pass decodes every frame (NVDEC pays off); extraction decodes few at full size, PyAV is faster
-    scores = _analyze(open_loader(sequence_dir, backends.decode, backends.gpu_index), frames, options, backends)
-    write_csv(scores, out / ARTIFACTS["frame_scores"], SCORE_COLUMNS)
+    loader = open_loader(sequence_dir, backends.decode, backends.gpu_index)
+    scores, grays = _analyze(loader, frames, options, backends)
     timings["pass_a"] = time.perf_counter() - t_start
     rejected = scores["rejected_reason"].ne("").to_numpy()
     log.info("analyzed %d frames in %.1f s, %d rejected", len(scores), timings["pass_a"], rejected.sum())
 
     t0 = time.perf_counter()
-    selection = select_uniform(t_ns, options.uniform_fps, scores["q"].to_numpy(), rejected)
+    ingest_manifest = read_manifest(ingest)
+    selection = _select(scores, grays, _gyro_angle(ingest, ingest_manifest.artifacts), options)
+    del grays
+    scores["flow_med"] = np.nan if selection.flow_med is None else selection.flow_med
+    scores["track_ratio"] = np.nan if selection.track_ratio is None else selection.track_ratio
+    write_csv(scores, out / ARTIFACTS["frame_scores"], FRAME_SCORES_COLUMNS)
     indices = selection.indices
     names = {i: image_name(sequence_id, i) for i in indices}
     timings["select"] = time.perf_counter() - t0
-    log.info("selected %d of %d frames at %.3g fps", len(indices), len(frames), options.uniform_fps)
+    log.info(
+        "%s selection: %d of %d frames (threshold scale %.3g after %d tuning passes)",
+        options.method,
+        len(indices),
+        len(frames),
+        selection.threshold_scale,
+        selection.tuning_iterations,
+    )
 
     t0 = time.perf_counter()
     loader = open_loader(sequence_dir)
@@ -162,7 +229,7 @@ def run_keyframes(
     write_csv(gravity, out / ARTIFACTS["gravity_priors"], GRAVITY_COLUMNS)
 
     warnings = []
-    imu_used = "sensors/gyro" in read_manifest(ingest).artifacts
+    imu_used = "sensors/gyro" in ingest_manifest.artifacts
     if imu_used:
         gyro = read_sensor_stream(sequence_dir, SensorKind.GYRO)
         R_cam_imu = np.asarray(info["extrinsics"][CAMERA_ID]["R_cam_imu"])
@@ -182,13 +249,16 @@ def run_keyframes(
     timings["plots"] = time.perf_counter() - t0
 
     gaps = keyframes["gap_s"].dropna()
+    triggers = ADAPTIVE_TRIGGERS if options.method == "adaptive" else ("uniform", "forced")
     reasons = scores["rejected_reason"]
     report = {
         "num_frames": len(frames),
         "num_rejected_by_reason": {r: int((reasons == r).sum()) for r in REJECT_REASONS},
         "num_keyframes": len(indices),
         "method": options.method,
-        "triggers_count": {t: selection.triggers.count(t) for t in sorted(set(selection.triggers))},
+        "triggers_count": {t: selection.triggers.count(t) for t in triggers},
+        "tuning_iterations": selection.tuning_iterations,
+        "threshold_scale": selection.threshold_scale,
         "mean_sharp_rel_selected": float(keyframes["sharp_rel"].mean()),
         "mean_sharp_rel_all": float(scores["sharp_rel"].mean()),
         "median_gap_s": float(gaps.median()) if len(gaps) else None,

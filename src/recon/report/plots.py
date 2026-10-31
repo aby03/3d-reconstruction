@@ -96,7 +96,7 @@ def plot_scores_timeline(
         on_key = np.searchsorted(t_s, keyframe_t_s).clip(0, len(t_s) - 1)
         ax.plot(keyframe_t_s, np.asarray(values)[on_key], "o", ms=3, color="tab:red", label="keyframes")
         if name in thresholds:
-            ax.axhline(thresholds[name], color="tab:gray", lw=0.8, ls="--", label="reject")
+            ax.axhline(thresholds[name], color="tab:gray", lw=0.8, ls="--", label="threshold")
         ax.set_ylabel(name)
         ax.legend(loc="upper right")
     axes[-1].set_xlabel("time [s]")

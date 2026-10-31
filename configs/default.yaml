@@ -22,7 +22,7 @@ ingest:
   gravity_bidirectional: true
 
 keyframes:
-  method: uniform
+  method: adaptive               # adaptive (overlap/rotation triggers) | uniform (one per 1/uniform_fps s, baseline)
   uniform_fps: 3.0
   analysis_long_side: 960        # quality metrics on frames scaled to this long side
   metrics_backend: auto          # auto | torch | numpy; auto uses torch on CUDA where available (follows device.preference)
@@ -37,5 +37,15 @@ keyframes:
     features: 0.5
     omega: 0.7
     clipped: 1.0
+  min_per_s: 2.5                 # adaptive: trigger thresholds are scaled until the keyframe count is
+  max_per_s: 7.0                 #   within [min_per_s, max_per_s] x duration
+  trigger:                       # adaptive: a new keyframe is due when any of these is reached since the last one
+    flow_frac: 0.04              # median KLT displacement, in image diagonals
+    track_ratio: 0.70            # fraction of the keyframe's corners still tracked (at or below)
+    rot_deg: 8.0                 # gyro rotation
+  window_s: 0.25                 # candidates from [t_trigger - window_s, t_trigger + window_s / 2]
+  min_track_ratio: 0.50          # a candidate still tracks this fraction of the keyframe's corners
+  min_flow_frac: 0.01            # and has moved at least this much (no near-duplicates)
+  max_gap_s: 1.0                 # longer without a trigger forces a keyframe
   jpeg_quality: 95
   prior_window: 3                # relative-rotation priors between keyframes up to this many apart

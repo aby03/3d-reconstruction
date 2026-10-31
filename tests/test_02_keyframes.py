@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation
 import yaml
 
 from recon.io.tables import read_csv, read_json
-from recon.keyframes.metrics import METRIC_COLUMNS, SCORE_COLUMNS, sharpness, to_gray
+from recon.keyframes.metrics import METRIC_COLUMNS, sharpness, to_gray
 from recon.keyframes.priors import cam_rotation_from_device
 from recon.pipeline.cli import main
 from recon.pipeline.config import DEFAULT_CONFIG, SECTIONS, ConfigError, PipelineConfig, load_config
@@ -19,12 +19,14 @@ from recon.pipeline.run_dir import manifest_hash, read_manifest
 from recon.pipeline.stages.common import open_loader
 from recon.pipeline.stages.s02_keyframes import (
     ARTIFACTS,
+    FRAME_SCORES_COLUMNS,
     GRAVITY_COLUMNS,
     KEYFRAMES_COLUMNS,
     ROTATION_COLUMNS,
 )
 
 IMAGE_NAME_RE = re.compile(r"room2_tiny_20261021_211400/cam0/\d{6}\.jpg")
+DURATION_S = 4.98  # first to last frame of the tiny clip
 
 
 @pytest.fixture(scope="module")
@@ -53,14 +55,66 @@ def test_manifest_and_report(keyframes):
     assert manifest.upstream == {"ingest": manifest_hash(out.parent / "01_ingest")}
 
     report = read_json(out / ARTIFACTS["selection_report"])
-    assert report["num_frames"] == 300 and report["num_keyframes"] == 15
-    assert report["method"] == "uniform" and report["imu_used"]
-    assert report["max_gap_s"] <= 0.7
+    assert report["num_frames"] == 300 and report["num_keyframes"] == manifest.metrics["num_keyframes"]
+    assert report["method"] == "adaptive" and report["imu_used"]
+    assert report["max_gap_s"] <= 1.0
     assert sum(report["num_rejected_by_reason"].values()) == manifest.metrics["num_rejected"]
+    assert sum(report["triggers_count"].values()) == report["num_keyframes"]
     assert report["mean_sharp_rel_selected"] >= report["mean_sharp_rel_all"]
 
 
-def test_uniform_selection(table):
+def _scores(out):
+    return read_csv(out / ARTIFACTS["frame_scores"], FRAME_SCORES_COLUMNS)
+
+
+@pytest.fixture(scope="module")
+def scores(out):
+    return _scores(out)
+
+
+def test_adaptive_selection(table, scores):
+    # the count is tuned into [2.5, 7.0] keyframes per second
+    assert 2.5 * DURATION_S <= len(table) <= 7.0 * DURATION_S
+    assert np.all(np.diff(table["idx"]) > 0)
+    gaps = table["gap_s"].iloc[1:]
+    assert ((gaps <= 1.0) | (table["trigger"].iloc[1:] == "forced")).all()
+    assert table["trigger"].iloc[0] == "first"
+    assert set(table["trigger"].iloc[1:]) <= {"flow", "track", "rotation", "forced"}
+    # flow_med and track_ratio are relative to the previous keyframe, also on the keyframe rows
+    selected = scores.set_index("idx").loc[table["idx"]]
+    triggered = (table["trigger"] != "forced").to_numpy()[1:]
+    assert (selected["track_ratio"].to_numpy()[1:][triggered] >= 0.5).all()
+    assert (selected["flow_med"].to_numpy()[1:][triggered] >= 0.01).all()
+    after_first = scores["idx"] > table["idx"].iloc[0]
+    assert scores.loc[after_first, "track_ratio"].between(0, 1).all()
+
+
+@pytest.fixture(scope="module")
+def uniform(tiny_capture, output_root, keyframes, tmp_path_factory):
+    """keyframes with `method=uniform` on a copy of the shared run, so the other tests keep the adaptive ones."""
+    root = tmp_path_factory.mktemp("uniform")
+    shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
+    seq_dir = root / "room2_tiny" / "sequences" / keyframes[1].parent.name
+    ingest_before = read_manifest(seq_dir / "01_ingest")
+    assert _run(tiny_capture, root, "--set", "keyframes.method=uniform") == 0
+    return root, seq_dir, ingest_before
+
+
+def test_changed_key_reruns_only_keyframes(uniform, keyframes):
+    root, seq_dir, ingest_before = uniform
+    assert _last_run(root) == {"ingest": "skipped", "keyframes": "success"}
+    assert read_manifest(seq_dir / "01_ingest") == ingest_before
+    manifest = read_manifest(seq_dir / "02_keyframes")
+    assert manifest.metrics["num_keyframes"] == 15
+    assert manifest.config_hash != keyframes[0].config_hash
+    assert len(list((seq_dir / "02_keyframes" / "images" / "cam0").iterdir())) == 15
+
+
+def test_uniform_selection(uniform):
+    out = uniform[1] / "02_keyframes"
+    table = read_csv(out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
+    assert read_json(out / ARTIFACTS["selection_report"])["method"] == "uniform"
+    assert _scores(out)[["flow_med", "track_ratio"]].isna().all().all()
     assert len(table) == 15
     assert np.all(np.diff(table["idx"]) > 0)
     assert np.all(np.diff(table["t_ns"]) > 0)
@@ -70,18 +124,17 @@ def test_uniform_selection(table):
     assert table["quality"].notna().all() and table["sharp_rel"].notna().all()
 
 
-@pytest.fixture(scope="module")
-def scores(out):
-    return read_csv(out / ARTIFACTS["frame_scores"], SCORE_COLUMNS)
-
-
 def test_frame_scores(scores):
     assert len(scores) == 300 and scores["idx"].tolist() == list(range(300))
     assert not scores[[*METRIC_COLUMNS, "sharp_rel", "omega_norm", "q"]].isna().any().any()
     assert scores["rejected_reason"].dropna().isin(["sharp_rel", "clipped", "feat_coverage", "omega_norm"]).all()
 
 
-def test_quality_aware_selection(scores, table):
+@pytest.mark.parametrize("method", ["adaptive", "uniform"])
+def test_quality_aware_selection(method, out, uniform):
+    if method == "uniform":
+        out = uniform[1] / "02_keyframes"
+    scores, table = _scores(out), read_csv(out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
     selected = scores.set_index("idx").loc[table["idx"]]
     assert selected["sharp_rel"].median() >= scores["sharp_rel"].median()
     assert np.allclose(selected["q"], table["quality"]) and np.allclose(selected["sharp_rel"], table["sharp_rel"])
@@ -116,7 +169,8 @@ def test_relative_rotation_priors(out, table):
     pos = {name: k for k, name in enumerate(table["image_name"])}
     steps = df["image_j"].map(pos) - df["image_i"].map(pos)
     assert set(steps) == {1, 2, 3}
-    assert len(df) == 14 + 13 + 12
+    n = len(table)
+    assert len(df) == (n - 1) + (n - 2) + (n - 3)
     assert (df["dt_s"] > 0).all()
 
     R = {(i, j): Rotation.from_quat(q) for i, j, *q in df[["image_i", "image_j", "qx", "qy", "qz", "qw"]].to_numpy()}
@@ -176,21 +230,6 @@ def test_rerun_skips_up_to_date_stages(tiny_capture, output_root, keyframes):
     assert _run(tiny_capture, output_root) == 0
     assert _last_run(output_root) == {"ingest": "skipped", "keyframes": "skipped"}
     assert _mtimes(seq_dir) == before
-
-
-def test_changed_key_reruns_only_keyframes(tiny_capture, output_root, keyframes, tmp_path):
-    # on a copy of the shared run, so the other tests keep their 3 fps keyframes
-    shutil.copytree(output_root / "room2_tiny" / "sequences", tmp_path / "room2_tiny" / "sequences")
-    seq_dir = tmp_path / "room2_tiny" / "sequences" / keyframes[1].parent.name
-    ingest_before = read_manifest(seq_dir / "01_ingest")
-
-    assert _run(tiny_capture, tmp_path, "--set", "keyframes.uniform_fps=2") == 0
-    assert _last_run(tmp_path) == {"ingest": "skipped", "keyframes": "success"}
-    assert read_manifest(seq_dir / "01_ingest") == ingest_before
-    manifest = read_manifest(seq_dir / "02_keyframes")
-    assert manifest.metrics["num_keyframes"] == 10
-    assert manifest.config_hash != keyframes[0].config_hash
-    assert len(list((seq_dir / "02_keyframes" / "images" / "cam0").iterdir())) == 10
 
 
 def test_config_errors(tiny_capture, output_root):

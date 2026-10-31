@@ -183,7 +183,9 @@ def build_parser() -> argparse.ArgumentParser:
     keyframes.add_argument("--input", required=True, type=Path, help="capture directory (root or stamp dir)")
     _add_config_args(keyframes)
     _add_output_args(keyframes)
-    keyframes.add_argument("--uniform-fps", type=float, help="same as --set keyframes.uniform_fps=F (default: 3)")
+    keyframes.add_argument(
+        "--uniform-fps", type=float, help="same as --set keyframes.uniform_fps=F (method uniform; default: 3)"
+    )
     keyframes.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
     keyframes.set_defaults(func=cmd_stage, stage=s02_keyframes.STAGE)
 
