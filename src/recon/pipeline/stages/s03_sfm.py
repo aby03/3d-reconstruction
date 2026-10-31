@@ -2,7 +2,6 @@
 
 import contextlib
 import logging
-import shutil
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -22,8 +21,8 @@ from recon.pipeline.stages import s01_ingest, s02_keyframes
 from recon.report import plots
 from recon.sfm import SfmOptions
 from recon.sfm.features import extract_features
-from recon.sfm.mapper import run_global_mapper
-from recon.sfm.matching import match_features, num_verified_pairs
+from recon.sfm.mapper import map_with_fallback
+from recon.sfm.matching import match_features, num_verified_pairs, resolve_strategy, resolve_vocab_tree
 from recon.sfm.priors import (
     PAIR_CHECKS,
     PAIR_FILTER_COLUMNS,
@@ -32,6 +31,7 @@ from recon.sfm.priors import (
     pair_rotation_errors,
     write_gravity_priors,
 )
+from recon.sfm.refine import refine, sanity_checks
 from recon.sfm.quality import (
     camera_centres,
     gravity_spread,
@@ -49,7 +49,9 @@ IMAGE_ROOT = "images"
 
 ARTIFACTS = {
     "database": "database.db",
-    "model": "sparse/raw",
+    "model_raw": "sparse/raw",
+    "model": "sparse/refined",
+    "model_txt": "sparse/refined_txt",
     "points": "sparse_points.ply",
     "intrinsics": "intrinsics.json",
     "report": "reports/sfm_report.json",
@@ -184,7 +186,13 @@ def run_sfm(
         )
 
         t0 = time.perf_counter()
-        strategy = match_features(database, len(names), options.matching, use_gpu, gpu_index)
+        strategy = resolve_strategy(len(names), options.matching)
+        vocab_tree = None
+        if strategy == "sequential" and options.matching.loop_detection:
+            vocab_tree = resolve_vocab_tree(options.matching.vocab_tree_path)
+            if vocab_tree is None:
+                warnings.append("no vocab tree: loop detection is off")
+        strategy = match_features(database, len(names), options.matching, use_gpu, gpu_index, vocab_tree)
         num_pairs = num_verified_pairs(database)
         timings["matching"] = time.perf_counter() - t0
         log.info("%s matching: %d verified pairs in %.1f s", strategy, num_pairs, timings["matching"])
@@ -209,24 +217,47 @@ def run_sfm(
 
         t0 = time.perf_counter()
         use_gravity = priors.use_gravity_prior and num_gravity_priors > 0
-        models_dir = out / "sparse" / "_global"
-        rec = run_global_mapper(database, image_root, models_dir, seed, use_gpu, gpu_index, use_gravity)
-        num_models = len([p for p in models_dir.iterdir() if p.is_dir()]) if models_dir.is_dir() else 0
+        work_dir = out / "sparse" / "_mapping"
+        raw, mapper_used, attempts = map_with_fallback(
+            database, image_root, work_dir, len(names), options.mapper, seed, use_gpu, gpu_index, use_gravity
+        )
         timings["mapping"] = time.perf_counter() - t0
-    if rec is None:
-        raise RuntimeError("global mapper produced no model")
+        if raw is None:
+            raise RuntimeError(f"no mapper produced a model: {[a['error'] for a in attempts]}")
+        if len(attempts) > 1:
+            warnings.append(
+                f"mapper fallback: {', '.join(a['mapper'] for a in attempts)} tried, {mapper_used} kept"
+                f" ({raw.num_reg_images()} of {len(names)} images registered)"
+            )
+            log.warning(warnings[-1])
+        write_model(raw, out / ARTIFACTS["model_raw"])
+        raw_stats = {"num_registered": raw.num_reg_images(), "mean_reproj_px": raw.compute_mean_reprojection_error()}
+
+        t0 = time.perf_counter()
+        if options.refine.enabled:
+            rec, refine_steps, dropped = refine(raw, database, image_root, options.refine, use_gpu, gpu_index)
+        else:
+            rec, refine_steps, dropped = raw, [], []
+        timings["refine"] = time.perf_counter() - t0
+    if dropped:
+        log.info("deregistered %d images with too few observations: %s", len(dropped), ", ".join(dropped))
+    sanity_warnings = sanity_checks(rec)
+    warnings += sanity_warnings
+    for warning in sanity_warnings:
+        log.warning(warning)
     log.info(
-        "global mapper%s: %d of %d images registered in %.1f s",
-        " with gravity" if use_gravity else "",
+        "refined model: %d images, %d points, %.3f px (raw %.3f px) in %.1f s",
         rec.num_reg_images(),
-        len(names),
-        timings["mapping"],
+        rec.num_points3D(),
+        rec.compute_mean_reprojection_error(),
+        raw_stats["mean_reproj_px"],
+        timings["refine"],
     )
 
     t0 = time.perf_counter()
     rec.extract_colors_for_all_images(image_root)
     write_model(rec, out / ARTIFACTS["model"])
-    shutil.rmtree(models_dir)
+    write_model(rec, out / ARTIFACTS["model_txt"], text=True)
     rec.export_PLY(out / ARTIFACTS["points"])
     keys = _camera_keys(rec)
     intrinsics = {keys[cid]: camera_intrinsics(cam) for cid, cam in sorted(rec.cameras.items()) if cid in keys}
@@ -237,10 +268,12 @@ def run_sfm(
     stats = model_stats(rec, names)
     report: dict[str, Any] = {
         **{k: v for k, v in stats.items() if k != "unregistered_images"},
-        "num_models": num_models,
+        "num_models": next(a["num_models"] for a in attempts if a["mapper"] == mapper_used),
         "num_verified_pairs": num_pairs,
         "matching_strategy": strategy,
-        "mapper_used": "global",
+        "loop_detection": {"enabled": vocab_tree is not None, "vocab_tree": vocab_tree},
+        "mapper_used": mapper_used,
+        "mapper_attempts": attempts,
         "num_gravity_priors": num_gravity_priors,
         "gravity_prior_used": use_gravity,
         "gravity_spread_deg": gravity_spread(rec, gravity),
@@ -248,6 +281,14 @@ def run_sfm(
         "pair_filter_checked": {check: int((errors["check"] == check).sum()) for check in PAIR_CHECKS},
         "pair_filter_disabled": disagree_frac is not None,
         "focal_px": {key: intrinsics[key]["fx"] for key in intrinsics},
+        "distortion": {key: intrinsics[key]["dist"] for key in intrinsics},
+        "raw": raw_stats,
+        "refine": {
+            "enabled": options.refine.enabled,
+            "steps": refine_steps,
+            "dropped_images": dropped,
+            "sanity_warnings": sanity_warnings,
+        },
         "unregistered_images": stats["unregistered_images"],
         "per_image": per_image_stats(rec),
         "backend": backend,

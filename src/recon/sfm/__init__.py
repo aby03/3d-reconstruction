@@ -4,6 +4,7 @@ from recon.sfm.features import FeatureOptions
 from recon.sfm.mapper import MapperOptions
 from recon.sfm.matching import MatchingOptions
 from recon.sfm.priors import PriorOptions
+from recon.sfm.refine import RefineOptions
 
 
 @dataclass(slots=True)
@@ -13,3 +14,4 @@ class SfmOptions:
     matching: MatchingOptions = field(default_factory=MatchingOptions)
     priors: PriorOptions = field(default_factory=PriorOptions)
     mapper: MapperOptions = field(default_factory=MapperOptions)
+    refine: RefineOptions = field(default_factory=RefineOptions)

@@ -91,7 +91,7 @@ def pair_rotation_errors(
     `images` has `image_name, sequence_id, idx, t_ns` per keyframe; `gyro` the rotations of the sequences that have
     them; `gravity` the down vector in the camera frame per image name. Pairs of one sequence up to `max_dt_s` apart
     are checked against the gyro, other pairs by how well the rotation carries one gravity prior onto the other
-    (`tilt`); pairs with neither are `none`. Returns `PAIR_FILTER_COLUMNS` without `removed`.
+    (`tilt`); pairs with neither, or without a relative pose, are `none`. Returns `PAIR_FILTER_COLUMNS` without `removed`.
     """
     info = images.set_index("image_name")
     db = pycolmap.Database.open(database)
@@ -107,8 +107,11 @@ def pair_rotation_errors(
         a, b = info.loc[name1], info.loc[name2]
         same_sequence = a["sequence_id"] == b["sequence_id"]
         dt_s = abs(int(b["t_ns"]) - int(a["t_ns"])) * 1e-9 if same_sequence else np.nan
-        R_img = tvg.cam2_from_cam1.rotation.matrix()
         check, err = "none", np.nan
+        rows.append([name1, name2, dt_s, check, err, len(tvg.inlier_matches)])
+        if tvg.cam2_from_cam1 is None:  # no relative pose estimated (e.g. a degenerate configuration)
+            continue
+        R_img = tvg.cam2_from_cam1.rotation.matrix()
         R_gyro = None
         if same_sequence and dt_s <= options.max_dt_s and a["sequence_id"] in gyro:
             R_gyro = gyro[a["sequence_id"]].cam_rotation(int(a["idx"]), int(b["idx"]))
@@ -116,7 +119,7 @@ def pair_rotation_errors(
             check, err = "gyro", _angle_deg(R_img @ R_gyro.T)
         elif name1 in gravity and name2 in gravity:
             check, err = "tilt", _vector_angle_deg(R_img @ gravity[name1], gravity[name2])
-        rows.append([name1, name2, dt_s, check, err, len(tvg.inlier_matches)])
+        rows[-1][3:5] = check, err
     return pd.DataFrame(rows, columns=PAIR_FILTER_COLUMNS[:-1])
 
 

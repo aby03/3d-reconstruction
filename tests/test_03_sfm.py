@@ -1,4 +1,5 @@
 import shutil
+from pathlib import Path
 
 import numpy as np
 import pycolmap
@@ -25,7 +26,9 @@ REPORT_KEYS = {
     "mean_track_len",
     "num_verified_pairs",
     "matching_strategy",
+    "loop_detection",
     "mapper_used",
+    "mapper_attempts",
     "num_gravity_priors",
     "gravity_prior_used",
     "gravity_spread_deg",
@@ -33,6 +36,9 @@ REPORT_KEYS = {
     "pair_filter_checked",
     "pair_filter_disabled",
     "focal_px",
+    "distortion",
+    "raw",
+    "refine",
     "unregistered_images",
     "per_image",
     "backend",
@@ -72,22 +78,25 @@ def test_report(report, keyframe_names):
     assert set(report) == REPORT_KEYS
     assert report["num_images_input"] == len(keyframe_names)
     assert report["registered_ratio"] >= 0.9
-    assert report["mean_reproj_px"] < 1.5
+    assert report["mean_reproj_px"] < 1.0
     assert report["median_track_len"] >= 3
     assert report["num_points3D"] > 1000
     assert report["num_models"] >= 1 and report["num_verified_pairs"] > 0
     assert report["mapper_used"] == "global" and report["matching_strategy"] == "exhaustive"
     assert set(report["per_image"]) | set(report["unregistered_images"]) == set(keyframe_names)
-    assert set(report["timings"]) == {"features", "matching", "pair_filter", "mapping", "outputs"}
+    assert set(report["timings"]) == {"features", "matching", "pair_filter", "mapping", "refine", "outputs"}
 
 
-def test_model(sfm_run, report, keyframe_names):
-    rec = pycolmap.Reconstruction(sfm_run / ARTIFACTS["model"])
-    assert rec.num_reg_images() == report["num_registered"]
+@pytest.mark.parametrize("model, camera_model", [("model_raw", "SIMPLE_RADIAL"), ("model", "OPENCV")])
+def test_model(sfm_run, report, keyframe_names, model, camera_model):
+    rec = pycolmap.Reconstruction(sfm_run / ARTIFACTS[model])
+    stats = report if model == "model" else report["raw"]
+    assert rec.num_reg_images() == stats["num_registered"]
+    assert np.isclose(rec.compute_mean_reprojection_error(), stats["mean_reproj_px"])
     assert {image.name for image in rec.images.values()} <= set(keyframe_names)
     assert len(rec.cameras) == 1
     camera = next(iter(rec.cameras.values()))
-    assert camera.model.name == "SIMPLE_RADIAL"
+    assert camera.model.name == camera_model
     assert (camera.width, camera.height) == (1080, 1920)
     assert 0.5 * 1920 <= camera.mean_focal_length() <= 3 * 1920
     # every image resolves through the symlinked image root
@@ -100,8 +109,10 @@ def test_intrinsics(sfm_run, report, sid):
     assert list(intrinsics) == [key] == list(report["focal_px"])
     cam = intrinsics[key]
     assert set(cam) == INTRINSICS_KEYS and set(cam["dist"]) == {"k1", "k2", "p1", "p2"}
-    assert cam["model"] == "SIMPLE_RADIAL" and (cam["width"], cam["height"]) == (1080, 1920)
-    assert cam["fx"] == cam["fy"] == cam["params"][0] == report["focal_px"][key]
+    assert cam["model"] == "OPENCV" and (cam["width"], cam["height"]) == (1080, 1920)
+    # the upgrade starts from fx == fy; bundle adjustment refines them separately
+    assert cam["fx"] == cam["params"][0] == report["focal_px"][key] and abs(cam["fy"] / cam["fx"] - 1) < 0.01
+    assert cam["dist"] == report["distortion"][key]
     assert np.isclose(cam["cx"], 540) and np.isclose(cam["cy"], 960)
 
 
@@ -188,3 +199,58 @@ def test_without_imu(no_imu, report):
     errors = read_csv(out / ARTIFACTS["pair_filter"], PAIR_FILTER_COLUMNS)
     assert len(errors) == no_imu_report["num_verified_pairs"] and not errors["removed"].any()
     assert no_imu_report["registered_ratio"] >= 0.9
+
+
+def test_refinement(sfm_run, report):
+    assert report["raw"]["mean_reproj_px"] > report["mean_reproj_px"]
+    assert report["num_registered"] >= report["raw"]["num_registered"] - 1
+    steps = [step["name"] for step in report["refine"]["steps"]]
+    assert steps == [
+        "input",
+        "retriangulate",
+        "filter_retriangulated",
+        "bundle_adjustment",
+        "filter",
+        "final_bundle_adjustment",
+    ]
+    assert report["refine"]["dropped_images"] == []
+    assert report["refine"]["steps"][-1]["mean_reproj_px"] == report["mean_reproj_px"]
+    assert report["refine"]["sanity_warnings"] == [] and read_manifest(sfm_run).warnings == []
+    assert (sfm_run / ARTIFACTS["model_txt"] / "cameras.txt").is_file()
+    # every pair is matched on the tiny clip, so no loop detection; the global mapper registers everything
+    assert report["loop_detection"] == {"enabled": False, "vocab_tree": None}
+    assert report["mapper_used"] == "global" and len(report["mapper_attempts"]) == 1
+    assert report["mapper_attempts"][0]["error"] is None
+
+
+@pytest.fixture(scope="module")
+def fallback(tiny_capture, output_root, sfm_run, tmp_path_factory):
+    """sfm on a copy of the shared sequences with an unreachable registration target (every mapper runs) and
+    sequential matching (loop detection runs when the vocab tree is available); returns its dir and report."""
+    root = tmp_path_factory.mktemp("fallback")
+    shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
+    overrides = ["sfm.mapper.min_registered_ratio=1.01", "sfm.matching.strategy=sequential"]
+    assert _run(tiny_capture, root, "--only", "sfm", *[a for o in overrides for a in ("--set", o)]) == 0
+    (out,) = (root / "room2_tiny" / "runs").glob("*/03_sfm")
+    return out, read_json(out / ARTIFACTS["report"])
+
+
+def test_mapper_fallback(fallback):
+    out, report = fallback
+    attempts = report["mapper_attempts"]
+    assert [a["mapper"] for a in attempts] == ["global", "global_no_gravity", "incremental"]
+    best = max(attempts, key=lambda a: (a["num_registered"], -(a["mean_reproj_px"] or 0)))
+    assert report["mapper_used"] == best["mapper"]
+    assert report["raw"]["num_registered"] == best["num_registered"]
+    assert report["registered_ratio"] >= 0.9
+    assert any(w.startswith("mapper fallback:") for w in read_manifest(out).warnings)
+    assert not (out / "sparse" / "_mapping").exists()
+
+
+def test_loop_detection(fallback):
+    out, report = fallback
+    assert report["matching_strategy"] == "sequential"
+    warned = "no vocab tree: loop detection is off" in read_manifest(out).warnings
+    assert report["loop_detection"]["enabled"] != warned
+    if report["loop_detection"]["enabled"]:
+        assert Path(report["loop_detection"]["vocab_tree"]).is_file()
