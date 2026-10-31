@@ -60,6 +60,10 @@ class OpenCameraFiles:
     def stamp_dir(self) -> Path:
         return self.root / self.stamp
 
+    @property
+    def sequence_id(self) -> str:
+        return f"{self.root.name}_{self.stamp}"
+
 
 def _videos_in(directory: Path) -> list[Path]:
     return sorted(p for p in directory.glob("VID_*.mp4") if VIDEO_RE.fullmatch(p.name))
@@ -201,7 +205,7 @@ class OpenCameraSensorsLoader(BaseCaptureLoader):
         )
 
         self.sequence = CaptureSequence(
-            sequence_id=f"{files.root.name}_{files.stamp}",
+            sequence_id=files.sequence_id,
             source_type=SOURCE_TYPE,
             root=files.root,
             cameras={camera.camera_id: camera},

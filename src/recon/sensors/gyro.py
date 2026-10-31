@@ -49,3 +49,21 @@ def frame_rotations(gyro: SensorStream, t_frames_ns: np.ndarray) -> np.ndarray:
         if gyro.t_ns[0] <= t_a and t_b <= gyro.t_ns[-1]:
             dR[k] = _integrate(gyro, t_a, t_b).as_quat()
     return dR
+
+
+def chain_rotations(dR_prev: np.ndarray) -> np.ndarray:
+    """(N, 4) xyzw: rotation of frame i relative to frame 0 (x_0 = R x_i), chained from `dR_prev`.
+
+    Drifts with the gyro bias. Rows from the first NaN step onward are NaN.
+    """
+    R_cum = np.full_like(dR_prev, np.nan)
+    if not len(dR_prev):
+        return R_cum
+    R = Rotation.from_quat(dR_prev[0])
+    R_cum[0] = R.as_quat()
+    for k in range(1, len(dR_prev)):
+        if np.isnan(dR_prev[k]).any():
+            break
+        R = R * Rotation.from_quat(dR_prev[k])
+        R_cum[k] = R.as_quat()
+    return R_cum

@@ -45,6 +45,50 @@ pixi run download-data
 
 ## Running 3d reconstruction pipeline
 
+The pipeline is run through the `recon` pixi task. Use the ~5 s test clip `data/room2_tiny` for quick sanity checks: every step runs in seconds on it, while the full `data/room2` capture gets expensive from SfM onward. Create the clip once with `pixi run make-test-clip`.
+
+```bash
+pixi run recon --help
+pixi run recon ingest --help
+```
+
+### Inspect a capture (writes nothing)
+Loads the capture, checks frame timing, sensor streams and reference JPEGs, syncs the sensors to the frames and prints a summary.
+```bash
+pixi run recon inspect --input data/room2_tiny
+```
+
+### Step 1: ingest
+```bash
+pixi run recon ingest --input data/room2_tiny
+```
+Writes `outputs/<scene>/sequences/<sequence_id>/01_ingest/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/01_ingest/`) and logs to `.../logs/pipeline.log`. A second run keeps the finished result; add `--force` to re-run.
+
+| Option | Meaning |
+|---|---|
+| `--input DIR` | capture folder (or its stamp folder) |
+| `--scene NAME` | scene name, defaults to the capture folder name |
+| `--output-root DIR` | defaults to `outputs` |
+| `--force` | re-run even if a successful result exists |
+| `--gravity-method complementary\|lowpass` | gravity estimator, default `complementary` |
+| `--time-offset-ns N` | added to frame times before sensor lookup |
+| `--no-verify-refs` | skip the reference JPEG check (faster, no pixel decoding) |
+
+`inspect` takes the same capture options (`--input`, `--gravity-method`, `--time-offset-ns`, `--no-verify-refs`).
+
+Results to look at:
+```bash
+D=outputs/room2_tiny/sequences/room2_tiny_20261021_211400/01_ingest
+cat $D/stage_manifest.json $D/reports/sync_report.json
+head $D/frames.csv $D/sync/frame_sensor_data.csv
+ls $D/reports/plots/        # timeline, sensor_rates, gravity, omega
+```
+
+### Tests
+```bash
+pixi run test               # runs every step's test on data/room2_tiny
+```
+
 
 ## Running tutorials
 
