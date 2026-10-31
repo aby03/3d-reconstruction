@@ -1,0 +1,23 @@
+# Every config key with its default. Later layers (--config FILE, then --set a.b=c) override these.
+
+run:
+  output_root: outputs
+  seed: 0
+
+loader:
+  allow_mismatch: false          # truncate video frames and timestamps to the shorter instead of failing
+  verify_reference_jpegs: true   # compare decoded frames with the saved JPEGs on load
+  max_reference_checks: null     # null checks every reference JPEG
+
+ingest:
+  camera_time_offset_ns: 0       # added to frame timestamps to get the sensor-clock query time
+  max_gap_ms: {accel: 20.0, gyro: 20.0, magnetic: 50.0}
+  required: [accel, gyro]
+  gravity_method: complementary  # complementary | lowpass
+  gravity_bidirectional: true
+
+keyframes:
+  method: uniform
+  uniform_fps: 3.0
+  jpeg_quality: 95
+  prior_window: 3                # relative-rotation priors between keyframes up to this many apart

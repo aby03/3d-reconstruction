@@ -1,7 +1,6 @@
 """Step 1: load and validate a capture, sync sensors to frames, and write `01_ingest/`."""
 
 import logging
-import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -12,7 +11,7 @@ import pandas as pd
 from recon.capture.open_camera_sensors import LoaderOptions, OpenCameraSensorsLoader
 from recon.core.types import CaptureSequence, FrameSensorData, SensorKind
 from recon.io.tables import write_csv, write_json, write_npz
-from recon.pipeline.run_dir import StageManifest, now_iso, stage_dir, write_manifest
+from recon.pipeline.stage import Stage, StageOutput, register_stage
 from recon.report import plots
 from recon.sensors.gyro import chain_rotations
 from recon.sensors.sync import COLUMNS, GRAV_CAM_COLUMNS, SyncOptions, synchronize
@@ -213,44 +212,23 @@ def _write_artifacts(out: Path, sequence: CaptureSequence, sync: FrameSensorData
 
 def run_ingest(
     input_dir: Path | str,
-    sequence_dir: Path,
+    out: Path,
     loader_opts: LoaderOptions | None = None,
     sync_opts: SyncOptions | None = None,
-) -> StageManifest:
-    """Run step 1 on one capture into `<sequence_dir>/01_ingest/`, replacing whatever was there."""
-    out = stage_dir(sequence_dir, DIR_NAME)
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
-    started, t_start = now_iso(), time.perf_counter()
+) -> StageOutput:
+    """Run step 1 on one capture, writing into the existing stage dir `out` (`01_ingest/`)."""
+    t_start = time.perf_counter()
+    log.info("loading %s", input_dir)
+    sequence = OpenCameraSensorsLoader(input_dir, loader_opts).load()
+    t_load = time.perf_counter() - t_start
+    log.info("synchronizing sensors to %d frames", sequence.cameras["cam0"].num_frames)
+    sync = synchronize(sequence, sync_opts)
+    t_sync = time.perf_counter() - t_start - t_load
 
-    def manifest(status: str, **fields) -> StageManifest:
-        return StageManifest(
-            stage=STAGE,
-            status=status,
-            started=started,
-            finished=now_iso(),
-            duration_s=round(time.perf_counter() - t_start, 3),
-            **fields,
-        )
-
-    try:
-        log.info("loading %s", input_dir)
-        sequence = OpenCameraSensorsLoader(input_dir, loader_opts).load()
-        t_load = time.perf_counter() - t_start
-        log.info("synchronizing sensors to %d frames", sequence.cameras["cam0"].num_frames)
-        sync = synchronize(sequence, sync_opts)
-        t_sync = time.perf_counter() - t_start - t_load
-
-        artifacts = _write_artifacts(out, sequence, sync)
-        report = sync_report(sequence, sync)
-        write_json(report, out / ARTIFACTS["sync_report"])
-    except Exception as e:
-        write_manifest(manifest("failed", warnings=[f"{type(e).__name__}: {e}"]), out)
-        raise
-
-    result = manifest(
-        "success",
+    artifacts = _write_artifacts(out, sequence, sync)
+    report = sync_report(sequence, sync)
+    write_json(report, out / ARTIFACTS["sync_report"])
+    return StageOutput(
         artifacts=artifacts,
         metrics={
             "num_frames": report["num_frames"],
@@ -263,6 +241,25 @@ def run_ingest(
         },
         warnings=report["warnings"],
     )
-    write_manifest(result, out)
-    log.info("ingest finished in %.1f s: %s", result.duration_s, out)
-    return result
+
+
+@register_stage
+class IngestStage(Stage):
+    name = STAGE
+    dir_name = DIR_NAME
+    scope = "sequence"
+    config_section = "ingest"
+
+    @property
+    def input_dir(self) -> Path:
+        return self.ctx.inputs[self.sequence_id]
+
+    def hash_inputs(self) -> dict[str, Any]:
+        return {"loader": self.ctx.config.loader, "input": str(self.input_dir.resolve())}
+
+    def run(self) -> StageOutput:
+        return run_ingest(self.input_dir, self.out, self.ctx.config.loader, self.options)
+
+    def expected_artifacts(self) -> list[Path]:
+        optional = {key for key in ARTIFACTS if key.startswith("sensors/")} | {"frame_rotations"}
+        return [self.out / rel for key, rel in ARTIFACTS.items() if key not in optional]

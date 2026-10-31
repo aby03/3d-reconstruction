@@ -1,5 +1,6 @@
 """Output directory naming, stage manifests and logging setup."""
 
+import hashlib
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -9,12 +10,31 @@ from typing import Any
 from recon.io.tables import read_json, write_json
 
 MANIFEST_NAME = "stage_manifest.json"
+RUN_MANIFEST_NAME = "run_manifest.json"
 LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+
+
+def scene_dir(output_root: Path | str, scene: str) -> Path:
+    return Path(output_root) / scene
 
 
 def sequence_dir(output_root: Path | str, scene: str, sequence_id: str) -> Path:
     """`<output_root>/<scene>/sequences/<sequence_id>/`, home of the per-sequence stages."""
-    return Path(output_root) / scene / "sequences" / sequence_id
+    return scene_dir(output_root, scene) / "sequences" / sequence_id
+
+
+def new_run_dir(scene_path: Path) -> Path:
+    """Create `<scene>/runs/<YYYYmmdd_HHMMSS[_NN]>/`, the record of one pipeline invocation."""
+    runs = scene_path / "runs"
+    base = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for n in range(100):
+        path = runs / (base if n == 0 else f"{base}_{n:02d}")
+        try:
+            path.mkdir(parents=True)
+            return path
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"too many runs started at {base} in {runs}")
 
 
 def stage_dir(parent: Path, dir_name: str) -> Path:
@@ -28,13 +48,16 @@ def now_iso() -> str:
 @dataclass(slots=True)
 class StageManifest:
     stage: str
-    status: str  # "success" | "failed"
+    status: str  # "success" | "failed" | "interrupted"
     started: str
     finished: str
     duration_s: float
     artifacts: dict[str, str] = field(default_factory=dict)  # name -> path relative to the stage dir
     metrics: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    config_hash: str = ""
+    upstream: dict[str, str] = field(default_factory=dict)  # upstream stage -> sha1 of its manifest file
+    error: str | None = None  # traceback tail of a failed stage
 
 
 def write_manifest(manifest: StageManifest, stage_path: Path) -> Path:
@@ -44,6 +67,12 @@ def write_manifest(manifest: StageManifest, stage_path: Path) -> Path:
 def read_manifest(stage_path: Path) -> StageManifest | None:
     path = stage_path / MANIFEST_NAME
     return StageManifest(**read_json(path)) if path.is_file() else None
+
+
+def manifest_hash(stage_path: Path) -> str | None:
+    """sha1 of the stage's manifest file, so a re-run upstream (new times, new results) changes it."""
+    path = stage_path / MANIFEST_NAME
+    return hashlib.sha1(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
 def setup_logging(log_file: Path | None = None) -> None:

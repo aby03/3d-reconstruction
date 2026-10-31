@@ -26,6 +26,12 @@ def test_discovery_from_root_and_stamp_dir(tiny_capture):
 
 
 @pytest.fixture(scope="module")
+def ingest(pipeline_run):
+    out = pipeline_run.stage_dir("ingest", pipeline_run.sequence_ids[0])
+    return read_manifest(out), out
+
+
+@pytest.fixture(scope="module")
 def out(ingest):
     return ingest[1]
 
@@ -47,7 +53,7 @@ def test_manifest_and_artifacts(ingest):
     assert manifest.artifacts == ARTIFACTS
     for rel in manifest.artifacts.values():
         assert (out / rel).is_file() and (out / rel).stat().st_size > 0
-    assert read_manifest(out) == manifest
+    assert len(manifest.config_hash) == 40 and manifest.upstream == {}
 
 
 @pytest.mark.parametrize("kind", list(SensorKind))
@@ -177,4 +183,6 @@ def test_cli_keeps_finished_ingest(tiny_capture, output_root, ingest):
     manifest, out = ingest
     assert main(["ingest", "--input", str(tiny_capture), "--output-root", str(output_root)]) == 0
     assert read_manifest(out) == manifest
-    assert (out.parent / "logs" / "pipeline.log").is_file()
+    run_dir = sorted((output_root / "room2_tiny" / "runs").iterdir())[-1]
+    assert (run_dir / "logs" / "pipeline.log").is_file() and (run_dir / "config.resolved.yaml").is_file()
+    assert [s["status"] for s in read_json(run_dir / "run_manifest.json")["stages"]] == ["skipped"]

@@ -49,32 +49,44 @@ The pipeline is run through the `recon` pixi task. Use the ~5 s test clip `data/
 
 ```bash
 pixi run recon --help
-pixi run recon ingest --help
+pixi run recon run --help
+pixi run recon list-stages     # stages in pipeline order, with their directories and config sections
 ```
+
+### Run the pipeline
+```bash
+pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes)
+pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
+pixi run recon run --input data/room2_tiny --set keyframes.uniform_fps=2
+```
+Per-sequence stages write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`). A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`.
+
+| Option | Meaning |
+|---|---|
+| `--input DIR` | capture folder (or its stamp folder) |
+| `--scene NAME` | scene name, defaults to the capture folder name |
+| `--output-root DIR` | same as `--set run.output_root=DIR`, defaults to `outputs` |
+| `--from STAGE` / `--to STAGE` | first / last stage to run |
+| `--only STAGE` | run just this stage; its upstream stages must already be done |
+| `--force STAGE` | re-run this stage and every stage after it |
+| `--config FILE` | YAML file layered on `configs/default.yaml` (repeatable) |
+| `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
+| `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
+
+**Config.** `configs/default.yaml` lists every key with its default, one section per step (`run`, `loader`, `ingest`, `keyframes`). Unknown keys and wrong types are errors that name the full key path.
 
 ### Inspect a capture (writes nothing)
 Loads the capture, checks frame timing, sensor streams and reference JPEGs, syncs the sensors to the frames and prints a summary.
 ```bash
 pixi run recon inspect --input data/room2_tiny
 ```
+Takes `--config`, `--set` and the capture shortcuts (`--gravity-method`, `--time-offset-ns`, `--no-verify-refs`).
 
 ### Step 1: ingest
 ```bash
 pixi run recon ingest --input data/room2_tiny
 ```
-Writes `outputs/<scene>/sequences/<sequence_id>/01_ingest/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/01_ingest/`) and logs to `.../logs/pipeline.log`. A second run keeps the finished result; add `--force` to re-run.
-
-| Option | Meaning |
-|---|---|
-| `--input DIR` | capture folder (or its stamp folder) |
-| `--scene NAME` | scene name, defaults to the capture folder name |
-| `--output-root DIR` | defaults to `outputs` |
-| `--force` | re-run even if a successful result exists |
-| `--gravity-method complementary\|lowpass` | gravity estimator, default `complementary` |
-| `--time-offset-ns N` | added to frame times before sensor lookup |
-| `--no-verify-refs` | skip the reference JPEG check (faster, no pixel decoding) |
-
-`inspect` takes the same capture options (`--input`, `--gravity-method`, `--time-offset-ns`, `--no-verify-refs`).
+Same as `recon run --only ingest`, with the same options except `--from/--to/--only`; `--force` re-runs it even if it is up to date. Writes `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/01_ingest/`.
 
 Results to look at:
 ```bash
@@ -85,19 +97,12 @@ ls $D/reports/plots/        # timeline, sensor_rates, gravity, omega
 ```
 
 ### Step 2: keyframes
-Needs a finished ingest of the same capture (`recon ingest` first).
+Needs a finished ingest of the same capture (`recon ingest` first, or use `recon run`).
 ```bash
 pixi run recon keyframes --input data/room2_tiny
+pixi run recon keyframes --input data/room2_tiny --uniform-fps 2    # same as --set keyframes.uniform_fps=2
 ```
-Selects keyframes uniformly in time, writes them as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. A second run keeps the finished result; add `--force` to re-run.
-
-| Option | Meaning |
-|---|---|
-| `--input DIR` | capture folder (or its stamp folder) |
-| `--scene NAME` | scene name, defaults to the capture folder name |
-| `--output-root DIR` | defaults to `outputs` |
-| `--uniform-fps F` | keyframes per second of video, default 3 |
-| `--force` | re-run even if a successful result exists |
+Same as `recon run --only keyframes`. Selects keyframes uniformly in time, writes them as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. `--force` re-runs it even if it is up to date.
 
 Results to look at:
 ```bash

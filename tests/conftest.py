@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from recon.capture.open_camera_sensors import discover_files
-from recon.pipeline.run_dir import sequence_dir
-from recon.pipeline.stages.s01_ingest import DIR_NAME, run_ingest
+from recon.pipeline.config import load_config
+from recon.pipeline.context import RunContext
+from recon.pipeline.runner import open_run, run_stages, select_stages
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TINY_CAPTURE = REPO_ROOT / "data" / "room2_tiny"
@@ -25,8 +25,9 @@ def output_root(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def ingest(tiny_capture, output_root):
-    """Ingest of the tiny clip, run once per session: (manifest, `01_ingest/` dir)."""
-    seq_dir = sequence_dir(output_root, SCENE, discover_files(tiny_capture).sequence_id)
-    manifest = run_ingest(tiny_capture, seq_dir)
-    return manifest, seq_dir / DIR_NAME
+def pipeline_run(tiny_capture, output_root) -> RunContext:
+    """ingest → keyframes on the tiny clip through the runner, once per session; later steps read its stage dirs."""
+    ctx = open_run(tiny_capture, load_config(overrides=[f"run.output_root={output_root}"]), SCENE)
+    result = run_stages(ctx, select_stages(to="keyframes"))
+    assert result.status == "success", result.error
+    return ctx

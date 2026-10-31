@@ -1,32 +1,33 @@
+import dataclasses
 import re
+import shutil
 
 import cv2
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+import yaml
+
 from recon.io.tables import read_csv, read_json
 from recon.keyframes.priors import cam_rotation_from_device
-from recon.keyframes.select import KeyframeOptions
 from recon.pipeline.cli import main
-from recon.pipeline.run_dir import read_manifest
+from recon.pipeline.config import DEFAULT_CONFIG, SECTIONS, ConfigError, PipelineConfig, load_config
+from recon.pipeline.run_dir import manifest_hash, read_manifest
 from recon.pipeline.stages.s02_keyframes import (
     ARTIFACTS,
-    DIR_NAME,
     GRAVITY_COLUMNS,
     KEYFRAMES_COLUMNS,
     ROTATION_COLUMNS,
-    run_keyframes,
 )
 
 IMAGE_NAME_RE = re.compile(r"room2_tiny_20261021_211400/cam0/\d{6}\.jpg")
 
 
 @pytest.fixture(scope="module")
-def keyframes(ingest):
-    seq_dir = ingest[1].parent
-    manifest = run_keyframes(seq_dir, KeyframeOptions(uniform_fps=3.0))
-    return manifest, seq_dir / DIR_NAME
+def keyframes(pipeline_run):
+    out = pipeline_run.stage_dir("keyframes", pipeline_run.sequence_ids[0])
+    return read_manifest(out), out
 
 
 @pytest.fixture(scope="module")
@@ -46,7 +47,7 @@ def test_manifest_and_report(keyframes):
     assert manifest.artifacts == ARTIFACTS
     for rel in manifest.artifacts.values():
         assert (out / rel).exists()
-    assert read_manifest(out) == manifest
+    assert manifest.upstream == {"ingest": manifest_hash(out.parent / "01_ingest")}
 
     report = read_json(out / ARTIFACTS["selection_report"])
     assert report["num_frames"] == 300 and report["num_keyframes"] == 15
@@ -106,3 +107,55 @@ def test_cli(tiny_capture, output_root, keyframes, tmp_path):
     assert main(["keyframes", "--input", str(tiny_capture), "--output-root", str(output_root)]) == 0
     assert read_manifest(out) == manifest
     assert main(["keyframes", "--input", str(tiny_capture), "--output-root", str(tmp_path)]) == 1
+
+
+def _run(capture, root, *args):
+    return main(["run", "--input", str(capture), "--output-root", str(root), "--to", "keyframes", *args])
+
+
+def _last_run(root):
+    run_dir = sorted((root / "room2_tiny" / "runs").iterdir())[-1]
+    return {s["stage"]: s["status"] for s in read_json(run_dir / "run_manifest.json")["stages"]}
+
+
+def _mtimes(seq_dir):
+    return {p: p.stat().st_mtime_ns for p in seq_dir.rglob("*")}
+
+
+def test_rerun_skips_up_to_date_stages(tiny_capture, output_root, keyframes):
+    seq_dir = keyframes[1].parent
+    before = _mtimes(seq_dir)
+    assert _run(tiny_capture, output_root) == 0
+    assert _last_run(output_root) == {"ingest": "skipped", "keyframes": "skipped"}
+    assert _mtimes(seq_dir) == before
+
+
+def test_changed_key_reruns_only_keyframes(tiny_capture, output_root, keyframes, tmp_path):
+    # on a copy of the shared run, so the other tests keep their 3 fps keyframes
+    shutil.copytree(output_root / "room2_tiny" / "sequences", tmp_path / "room2_tiny" / "sequences")
+    seq_dir = tmp_path / "room2_tiny" / "sequences" / keyframes[1].parent.name
+    ingest_before = read_manifest(seq_dir / "01_ingest")
+
+    assert _run(tiny_capture, tmp_path, "--set", "keyframes.uniform_fps=2") == 0
+    assert _last_run(tmp_path) == {"ingest": "skipped", "keyframes": "success"}
+    assert read_manifest(seq_dir / "01_ingest") == ingest_before
+    manifest = read_manifest(seq_dir / "02_keyframes")
+    assert manifest.metrics["num_keyframes"] == 10
+    assert manifest.config_hash != keyframes[0].config_hash
+    assert len(list((seq_dir / "02_keyframes" / "images" / "cam0").iterdir())) == 10
+
+
+def test_config_errors(tiny_capture, output_root):
+    with pytest.raises(ConfigError, match=r"keyframes\.no_such_key"):
+        load_config(overrides=["keyframes.no_such_key=1"])
+    with pytest.raises(ConfigError, match=r"keyframes\.uniform_fps"):
+        load_config(overrides=["keyframes.uniform_fps=fast"])
+    assert _run(tiny_capture, output_root, "--set", "keyframes.no_such_key=1") == 2
+
+
+def test_default_config_lists_every_key():
+    data = yaml.safe_load(DEFAULT_CONFIG.read_text())
+    assert {name: set(data[name]) for name in SECTIONS} == {
+        name: {f.name for f in dataclasses.fields(cls)} for name, cls in SECTIONS.items()
+    }
+    assert load_config() == PipelineConfig()
