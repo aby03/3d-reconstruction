@@ -84,6 +84,29 @@ head $D/frames.csv $D/sync/frame_sensor_data.csv
 ls $D/reports/plots/        # timeline, sensor_rates, gravity, omega
 ```
 
+### Step 2: keyframes
+Needs a finished ingest of the same capture (`recon ingest` first).
+```bash
+pixi run recon keyframes --input data/room2_tiny
+```
+Selects keyframes uniformly in time, writes them as full-resolution upright JPEGs, and writes per-keyframe IMU priors (gravity in the camera frame, gyro rotations between nearby keyframes) to `.../room2_tiny_20261021_211400/02_keyframes/`. A second run keeps the finished result; add `--force` to re-run.
+
+| Option | Meaning |
+|---|---|
+| `--input DIR` | capture folder (or its stamp folder) |
+| `--scene NAME` | scene name, defaults to the capture folder name |
+| `--output-root DIR` | defaults to `outputs` |
+| `--uniform-fps F` | keyframes per second of video, default 3 |
+| `--force` | re-run even if a successful result exists |
+
+Results to look at:
+```bash
+D=outputs/room2_tiny/sequences/room2_tiny_20261021_211400/02_keyframes
+cat $D/stage_manifest.json $D/reports/selection_report.json
+head $D/keyframes.csv $D/priors/gravity_cam.csv $D/priors/relative_rotations.csv
+ls $D/images/cam0/          # <frame idx>.jpg
+```
+
 ### Tests
 ```bash
 pixi run test               # runs every step's test on data/room2_tiny

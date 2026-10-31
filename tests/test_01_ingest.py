@@ -7,13 +7,12 @@ from recon.core.frames import ANDROID_DEVICE, DEVICE_ORIENTATIONS, R_cam_imu_upr
 from recon.core.types import SensorKind, SensorStream
 from recon.io.tables import read_csv, read_json
 from recon.pipeline.cli import main
-from recon.pipeline.run_dir import read_manifest, sequence_dir
-from recon.pipeline.stages.s01_ingest import ARTIFACTS, DIR_NAME, FRAMES_COLUMNS, SENSOR_COLUMNS, run_ingest
+from recon.pipeline.run_dir import read_manifest
+from recon.pipeline.stages.s01_ingest import ARTIFACTS, FRAMES_COLUMNS, SENSOR_COLUMNS
 from recon.sensors.gyro import integrate_rotation
 from recon.sensors.sync import COLUMNS, GRAV_CAM_COLUMNS
 
 EXPECTED_RATE_HZ = {SensorKind.ACCEL: 457.0, SensorKind.GYRO: 457.0, SensorKind.MAG: 100.0}
-SCENE = "room2_tiny"
 
 
 def test_discovery_from_root_and_stamp_dir(tiny_capture):
@@ -24,18 +23,6 @@ def test_discovery_from_root_and_stamp_dir(tiny_capture):
     assert set(files.sensors) == set(SensorKind)
     assert len(files.reference_images) >= 3
     assert files.warnings == []
-
-
-@pytest.fixture(scope="module")
-def output_root(tmp_path_factory):
-    return tmp_path_factory.mktemp("outputs")
-
-
-@pytest.fixture(scope="module")
-def ingest(tiny_capture, output_root):
-    seq_dir = sequence_dir(output_root, SCENE, discover_files(tiny_capture).sequence_id)
-    manifest = run_ingest(tiny_capture, seq_dir)
-    return manifest, seq_dir / DIR_NAME
 
 
 @pytest.fixture(scope="module")
