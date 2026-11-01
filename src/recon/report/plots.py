@@ -205,3 +205,19 @@ def plot_height_histogram(
     ax.set_ylabel("count")
     ax.legend(loc="upper right")
     return _save(fig, path)
+
+
+def plot_yaw_histogram(histogram: np.ndarray, yaw_deg: float | None, applied: bool, path: Path) -> Path:
+    """Wall-normal directions mod 90° (1° bins) with the chosen yaw marked."""
+    fig = Figure(figsize=(7, 4))
+    ax = fig.subplots()
+    ax.bar(np.arange(len(histogram)) + 0.5, histogram, width=1.0, color="tab:gray")
+    if yaw_deg is not None:
+        label = f"yaw {yaw_deg:.1f}° ({'applied' if applied else 'not applied'})"
+        ax.axvline(yaw_deg % 90.0, color="tab:red" if applied else "tab:orange", lw=1.0, ls="--", label=label)
+        ax.legend(loc="upper right")
+    ax.set_title("wall normal directions (mod 90°)")
+    ax.set_xlabel("atan2(n_y, n_x) mod 90 (degrees)")
+    ax.set_ylabel("count")
+    ax.set_xlim(0, 90)
+    return _save(fig, path)

@@ -22,6 +22,10 @@ REPORT_KEYS = {
     "sfm",
     "gravity",
     "floor",
+    "manhattan",
+    "cam_imu",
+    "suggested_config",
+    "suggested_config_note",
     "W_from_sfm",
     "extent",
     "units",
@@ -49,6 +53,23 @@ FLOOR_KEYS = {
     "plane",
     "cameras_above_frac",
     "camera_height_median",
+}
+MANHATTAN_KEYS = {"enabled", "applied", "yaw_deg", "rotation_deg", "confidence", "num_normals", "extents"}
+CAM_IMU_KEYS = {
+    "num_pairs",
+    "num_rotating_pairs",
+    "R_cam_imu",
+    "angle_to_nominal_deg",
+    "residual_median_deg",
+    "axis_singular_values",
+    "well_conditioned",
+    "time_offset_ms",
+    "cost_at_zero",
+    "cost_best",
+    "sharpness",
+    "at_edge",
+    "corr_peak_ms",
+    "at_offset",
 }
 
 
@@ -101,7 +122,7 @@ def test_report(report, sfm_run):
     assert set(report) == REPORT_KEYS
     assert set(report["gravity"]) == GRAVITY_KEYS and set(report["floor"]) == FLOOR_KEYS
     assert report["input_model"] == "03_sfm/sparse/refined" and report["units"] == "arbitrary"
-    assert set(report["timings"]) == {"load", "gravity", "floor", "write"}
+    assert set(report["timings"]) == {"load", "gravity", "floor", "manhattan", "cam_imu", "write"}
     gravity, floor = report["gravity"], report["floor"]
     assert gravity["method"] == "imu" and gravity["num_used"] >= 3
     assert gravity["residual_median_deg"] < 1.5 and gravity["residual_p90_deg"] < 3
@@ -124,7 +145,7 @@ def test_transform(models, transform):
     rec, aligned = models
     assert transform["units"] == "arbitrary" and transform["up_axis"] == "+Z"
     assert transform["gravity"] == [0.0, 0.0, -1.0]
-    assert "enabled" not in transform and [s["name"] for s in transform["steps"]] == ["gravity", "floor"]
+    assert "enabled" not in transform and [s["name"] for s in transform["steps"]] == ["gravity", "floor", "manhattan"]
     W = Sim3.from_dict(transform["W_from_sfm"])
     assert W.scale == 1.0
     assert np.allclose(W.R @ W.R.T, np.eye(3)) and np.isclose(np.linalg.det(W.R), 1.0)
@@ -176,6 +197,44 @@ def test_tum(pipeline_run, sid, align_run, models):
     assert np.allclose(Rotation.from_quat(rows[:, 4:]).as_matrix(), R_WC, atol=1e-6)
 
 
+def test_manhattan(report, transform, models):
+    manhattan = report["manhattan"]
+    assert set(manhattan) == MANHATTAN_KEYS
+    assert 0 <= manhattan["confidence"] <= 1 and -45 < manhattan["yaw_deg"] <= 45
+    assert manhattan["num_normals"] > 100
+    assert manhattan["applied"] == (manhattan["confidence"] >= 0.25)
+    step = transform["steps"][-1]
+    assert step["applied"] == manhattan["applied"] and step["t"] == [0.0, 0.0, 0.0]
+    R = np.array(step["R"])
+    # a rotation about Z: up, the floor height and the origin stay where the floor step put them
+    assert np.allclose(R[:, 2], [0, 0, 1]) and np.allclose(R[2], [0, 0, 1])
+    if manhattan["applied"]:
+        angle = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
+        assert np.isclose(angle, -manhattan["rotation_deg"])
+        assert manhattan["rotation_deg"] - manhattan["yaw_deg"] in (-90.0, 0.0, 90.0)  # X along one of the walls
+    else:
+        assert np.allclose(R, np.eye(3))
+
+
+def test_cam_imu(report, sid):
+    assert list(report["cam_imu"]) == [sid]
+    cam_imu = report["cam_imu"][sid]
+    assert set(cam_imu) == CAM_IMU_KEYS
+    assert cam_imu["num_pairs"] > 30 and cam_imu["well_conditioned"]
+    assert cam_imu["angle_to_nominal_deg"] < 5  # measured 1.0°
+    R = np.array(cam_imu["R_cam_imu"])
+    assert np.allclose(R @ R.T, np.eye(3)) and np.isclose(np.linalg.det(R), 1.0)
+    assert abs(cam_imu["time_offset_ms"]) < 50 and not cam_imu["at_edge"]  # measured +12 ms
+    assert cam_imu["cost_best"] <= cam_imu["cost_at_zero"]
+    assert abs(cam_imu["corr_peak_ms"] - cam_imu["time_offset_ms"]) < 10
+    assert cam_imu["residual_median_deg"]["estimate"] <= cam_imu["residual_median_deg"]["nominal"] + 0.05
+    # a suggestion only for a clear minimum; it is never applied
+    suggestion = report["suggested_config"].get(sid)
+    if cam_imu["cost_at_zero"] >= 1.2 * cam_imu["cost_best"]:
+        assert suggestion["ingest.camera_time_offset_ns"] == round(cam_imu["time_offset_ms"] * 1e6)
+    assert "report only" in report["suggested_config_note"]
+
+
 def _align(capture, root, *args):
     return main(["align", "--input", str(capture), "--output-root", str(root), *args])
 
@@ -192,18 +251,39 @@ def test_cli_needs_sfm(tiny_capture, output_root, pipeline_run, tmp_path, capsys
     assert "run `recon sfm` first" in capsys.readouterr().out
 
 
-@pytest.fixture(scope="module")
-def camera_up(tiny_capture, output_root, align_run, tmp_path_factory):
-    """align with `gravity.method=camera_up` on a copy of the shared sequences and run; returns its stage dir."""
-    root = tmp_path_factory.mktemp("camera_up")
+def _align_copy(tiny_capture, output_root, align_run, root, *overrides):
+    """align with `overrides` on a copy of the shared sequences and run under `root`; returns its stage dir."""
     run_dir = align_run.parent
     shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
     shutil.copytree(run_dir, root / "room2_tiny" / "runs" / run_dir.name, symlinks=True)
-    args = ["--resume", run_dir.name, "--force", "--set", "align.gravity.method=camera_up"]
+    args = ["--resume", run_dir.name, "--force", *[a for o in overrides for a in ("--set", o)]]
     assert _align(tiny_capture, root, *args) == 0
     stages = read_json(root / "room2_tiny" / "runs" / run_dir.name / "run_manifest.json")["stages"]
     assert [(s["stage"], s["status"]) for s in stages] == [("align", "success")]
     return root / "room2_tiny" / "runs" / run_dir.name / align_run.name
+
+
+@pytest.fixture(scope="module")
+def camera_up(tiny_capture, output_root, align_run, tmp_path_factory):
+    root = tmp_path_factory.mktemp("camera_up")
+    return _align_copy(tiny_capture, output_root, align_run, root, "align.gravity.method=camera_up")
+
+
+@pytest.fixture(scope="module")
+def no_manhattan(tiny_capture, output_root, align_run, tmp_path_factory):
+    root = tmp_path_factory.mktemp("no_manhattan")
+    return _align_copy(tiny_capture, output_root, align_run, root, "align.manhattan.enabled=false")
+
+
+def test_manhattan_disabled(no_manhattan, transform):
+    report = read_json(no_manhattan / ARTIFACTS["report"])
+    assert not report["manhattan"]["enabled"] and not report["manhattan"]["applied"]
+    steps = read_json(no_manhattan / ARTIFACTS["transform"])["steps"]
+    assert steps[-1]["name"] == "manhattan" and not steps[-1]["applied"]
+    assert np.allclose(steps[-1]["R"], np.eye(3))
+    # the gravity and floor steps are unchanged, and so is up
+    assert steps[:2] == transform["steps"][:2]
+    assert angle_deg(_up_in_sfm(read_json(no_manhattan / ARTIFACTS["transform"])), _up_in_sfm(transform)) < 1e-6
 
 
 def test_camera_up_fallback(camera_up, transform):

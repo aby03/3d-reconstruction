@@ -1,4 +1,4 @@
-"""World frame W of a COLMAP model: gravity onto −Z, floor plane at z = 0, origin under the cameras."""
+"""World frame W of a COLMAP model: gravity onto −Z, floor at z = 0, origin under the cameras, X/Y along walls."""
 
 import logging
 import time
@@ -10,6 +10,7 @@ import pycolmap
 from recon.align import AlignOptions
 from recon.align.floor import UP, FloorOptions, FloorResult, find_floor, floor_points
 from recon.align.gravity import DOWN, down_vectors, estimate_gravity, residuals_deg
+from recon.align.manhattan import ManhattanOptions, estimate_yaw
 from recon.core.geometry import R_to_quat, Sim3, angle_deg, rotation_between
 from recon.io.colmap import parse_image_name, to_sim3d
 from recon.sfm.quality import camera_centres
@@ -51,6 +52,39 @@ def _stats(r: np.ndarray, huber_deg: float) -> dict[str, Any]:
     }
 
 
+def _rotation_z(deg: float) -> np.ndarray:
+    c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _manhattan_step(
+    points: np.ndarray, options: ManhattanOptions, warnings: list[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The `manhattan` step (yaw about Z through the origin, identity when not applied) and its report values."""
+    result = estimate_yaw(points, options) if options.enabled else None
+    applied = result is not None and result.confidence >= options.min_confidence
+    if options.enabled and result is None:
+        warnings.append("Manhattan yaw skipped: no wall-like point normals")
+    info = {
+        "enabled": options.enabled,
+        "applied": applied,
+        "yaw_deg": None if result is None else result.yaw_deg,
+        "rotation_deg": None if result is None else result.rotation_deg,
+        "confidence": None if result is None else result.confidence,
+        "num_normals": 0 if result is None else result.num_normals,
+        "extents": None if result is None else result.extents,
+        "histogram": None if result is None else result.histogram.tolist(),
+    }
+    R = _rotation_z(-result.rotation_deg) if applied else np.eye(3)
+    step = {
+        "name": "manhattan",
+        "R": R.tolist(),
+        "t": [0.0, 0.0, 0.0],
+        **{k: info[k] for k in ("yaw_deg", "rotation_deg", "confidence", "applied", "num_normals")},
+    }
+    return step, info
+
+
 def align_model(
     rec: pycolmap.Reconstruction,
     gravity: dict[str, np.ndarray],
@@ -62,7 +96,8 @@ def align_model(
 
     `gravity` holds the camera-frame down vector per image name, `conf` its confidence. Gravity comes from the priors
     (or the image-down direction refined by the floor, see `estimate_gravity`); then the floor plane gives a small
-    tilt correction and z = 0, and the median camera x/y the origin.
+    tilt correction and z = 0, and the median camera x/y the origin. Last, a yaw about Z puts X/Y along the dominant
+    walls when their direction is clear (`manhattan`, listed with `applied: false` otherwise).
     """
     options = options or AlignOptions()
     warnings: list[str] = []
@@ -150,9 +185,16 @@ def align_model(
             **{k: floor_info[k] for k in FLOOR_STEP_KEYS},
         },
     ]
+    t0 = time.perf_counter()
+    points_W = W_from_sfm.apply(np.array([p.xyz for p in rec.points3D.values()]).reshape(-1, 3))
+    manhattan_step, manhattan_info = _manhattan_step(points_W, options.manhattan, warnings)
+    steps.append(manhattan_step)
+    W_from_sfm = Sim3.from_dict(manhattan_step) @ W_from_sfm
+    timings["manhattan"] = time.perf_counter() - t0
     diagnostics = {
         "gravity": {**gravity_info, **stats},
         "floor": floor_info,
+        "manhattan": manhattan_info,
         "residuals_deg": residuals,
         "warnings": warnings,
         "timings": timings,

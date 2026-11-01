@@ -108,3 +108,16 @@ align:                           # world frame W: Z up, gravity -Z, floor z = 0,
     ransac_iterations: 1000
     max_reproj_px: 1.5           # floor candidates: points with a smaller error
     min_track_len: 3             #   and a longer track
+  manhattan:                     # yaw about Z so that X/Y follow the dominant walls
+    enabled: true
+    min_confidence: 0.25         # mass of the peak bin +- peak_halfwidth_deg bins; below: yaw not applied
+    knn: 30                      # neighbours for the point normals
+    min_planarity: 5.0           # second / smallest eigenvalue of the neighbourhood
+    max_normal_z: 0.2            # wall-like normals are this close to horizontal
+    peak_halfwidth_deg: 2        # in 1° bins (the confidence window is 5° wide)
+    extent_tie: 1.1              # 90° ambiguity: X along the longer side, unless the sides are this close
+  cam_imu:                       # hand-eye R_cam_imu and camera time offset from SfM vs gyro; report only
+    enabled: true
+    pair_span: 5                 # keyframe pairs up to this many apart
+    min_rotation_deg: 2.0        # hand-eye uses pairs that rotate at least this much
+    max_offset_ms: 100.0         # time offsets searched in +-this, 1 ms steps

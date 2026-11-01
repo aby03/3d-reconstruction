@@ -1,4 +1,5 @@
-"""Step 4: move the refined SfM model into the world frame W (Z up, gravity −Z, floor z = 0) in `04_alignment/`."""
+"""Step 4: move the refined SfM model into the world frame W (Z up, gravity −Z, floor z = 0, X/Y along the walls)
+in `04_alignment/`, and check the camera–IMU calibration against the SfM poses."""
 
 import logging
 import time
@@ -10,11 +11,19 @@ import pycolmap
 
 from recon.align import AlignOptions
 from recon.align.apply import align_model, apply_transform, tum_lines
+from recon.align.cam_imu import SequenceImu, diagnose
+from recon.core.types import SensorKind
 from recon.io.colmap import write_model
 from recon.io.tables import read_json, write_json
+from recon.pipeline.run_dir import read_manifest, stage_dir
 from recon.pipeline.stage import Stage, StageOutput, register_stage
-from recon.pipeline.stages import s03_sfm
-from recon.pipeline.stages.common import gravity_vectors, read_keyframe_inputs
+from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm
+from recon.pipeline.stages.common import (
+    KeyframeInputs,
+    gravity_vectors,
+    read_keyframe_inputs,
+    read_sensor_stream,
+)
 from recon.report import plots
 from recon.sfm.quality import camera_centres
 
@@ -23,6 +32,10 @@ log = logging.getLogger(__name__)
 STAGE = "align"
 DIR_NAME = "04_alignment"
 UNITS = "arbitrary"
+SUGGESTION_NOTE = (
+    "report only, never applied: a time offset is applied by re-running ingest -> align with"
+    " ingest.camera_time_offset_ns; R_cam_imu can't be set from the config yet"
+)
 
 ARTIFACTS = {
     "model": "sparse_aligned",
@@ -34,6 +47,7 @@ ARTIFACTS = {
     "plot_gravity": "reports/plots/gravity_residuals.png",
     "plot_height": "reports/plots/height_hist.png",
     "plot_trajectory": "reports/plots/trajectory_topdown.png",
+    "plot_yaw": "reports/plots/yaw_hist.png",
 }
 
 
@@ -41,7 +55,27 @@ def _deg(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}"
 
 
-def _write_plots(out: Path, rec: pycolmap.Reconstruction, residuals: np.ndarray, floor_detected: bool) -> None:
+def _imu_inputs(sequence_dirs: dict[str, Path], inputs: KeyframeInputs) -> tuple[dict[str, SequenceImu], list[str]]:
+    """Per sequence with a gyro stream: its keyframes, gyro, and the R_cam_imu and time offset ingest used."""
+    sequences, warnings = {}, []
+    for sequence_id, sequence_dir in sequence_dirs.items():
+        ingest = stage_dir(sequence_dir, s01_ingest.DIR_NAME)
+        if f"sensors/{SensorKind.GYRO}" not in read_manifest(ingest).artifacts:
+            warnings.append(f"camera-IMU check of {sequence_id} skipped: no gyro")
+            continue
+        extrinsics = read_json(ingest / s01_ingest.ARTIFACTS["sequence"])["extrinsics"][s02_keyframes.CAMERA_ID]
+        sequences[sequence_id] = SequenceImu(
+            keyframes=inputs.images.loc[inputs.images["sequence_id"] == sequence_id, ["image_name", "t_ns"]],
+            gyro=read_sensor_stream(sequence_dir, SensorKind.GYRO),
+            R_cam_imu=np.asarray(extrinsics["R_cam_imu"], dtype=float),
+            time_offset_ns=int(extrinsics["time_offset_ns"]),
+        )
+    return sequences, warnings
+
+
+def _write_plots(
+    out: Path, rec: pycolmap.Reconstruction, residuals: np.ndarray, floor_detected: bool, manhattan: dict[str, Any]
+) -> None:
     plots.plot_histogram(
         residuals, out / ARTIFACTS["plot_gravity"], "gravity residual (prior vs world down)", "degrees", bins=50
     )
@@ -51,6 +85,8 @@ def _write_plots(out: Path, rec: pycolmap.Reconstruction, residuals: np.ndarray,
         points[:, 2], 0.0 if floor_detected else None, centres[:, 2], out / ARTIFACTS["plot_height"]
     )
     plots.plot_trajectory_topdown(centres, points, out / ARTIFACTS["plot_trajectory"], axes="xy")
+    histogram = np.asarray(manhattan["histogram"] or np.zeros(90))
+    plots.plot_yaw_histogram(histogram, manhattan["yaw_deg"], manhattan["applied"], out / ARTIFACTS["plot_yaw"])
 
 
 def run_align(
@@ -73,6 +109,14 @@ def run_align(
     W_from_sfm, steps, diagnostics = align_model(rec, gravity, conf, options, seed)
     timings.update(diagnostics["timings"])
     warnings = diagnostics["warnings"]
+
+    t0 = time.perf_counter()
+    cam_imu: dict[str, Any] = {}
+    if options.cam_imu.enabled:
+        sequences, imu_warnings = _imu_inputs(sequence_dirs, inputs)
+        cam_imu, diagnose_warnings = diagnose(rec, sequences, options.cam_imu)
+        warnings += imu_warnings + diagnose_warnings
+    timings["cam_imu"] = time.perf_counter() - t0
     for warning in warnings:
         log.warning(warning)
 
@@ -93,7 +137,9 @@ def run_align(
     trajectory.mkdir(parents=True, exist_ok=True)
     for sequence_id, lines in tum_lines(aligned, t_ns).items():
         (trajectory / f"{sequence_id}.txt").write_text("".join(f"{line}\n" for line in lines))
-    _write_plots(out, aligned, diagnostics["residuals_deg"], diagnostics["floor"]["detected"])
+    _write_plots(
+        out, aligned, diagnostics["residuals_deg"], diagnostics["floor"]["detected"], diagnostics["manhattan"]
+    )
     timings["write"] = time.perf_counter() - t0
 
     points = np.array([p.xyz for p in aligned.points3D.values()]).reshape(-1, 3)
@@ -105,6 +151,10 @@ def run_align(
         "sfm": {k: sfm_report.get(k) for k in ("mapper_used", "gravity_prior_used", "gravity_spread_deg")},
         "gravity": diagnostics["gravity"],
         "floor": diagnostics["floor"],
+        "manhattan": {k: v for k, v in diagnostics["manhattan"].items() if k != "histogram"},
+        "cam_imu": {sid: {k: v for k, v in r.items() if k != "suggestion"} for sid, r in cam_imu.items()},
+        "suggested_config": {sid: r["suggestion"] for sid, r in cam_imu.items() if r.get("suggestion")},
+        "suggested_config_note": SUGGESTION_NOTE,
         "W_from_sfm": transform["W_from_sfm"],
         "extent": {"min": lo.tolist(), "max": hi.tolist()},
         "units": UNITS,
@@ -120,6 +170,23 @@ def run_align(
         _deg(gravity_report["residual_median_deg"]),
         f"tilt {_deg(floor_report['tilt_to_gravity_deg'])} deg" if floor_report["detected"] else "not found",
     )
+    manhattan = report["manhattan"]
+    log.info(
+        "Manhattan yaw %s deg, confidence %s: %s",
+        _deg(manhattan["rotation_deg"]),
+        _deg(manhattan["confidence"]),
+        "applied" if manhattan["applied"] else "not applied",
+    )
+    for sequence_id, r in report["cam_imu"].items():
+        if "error" not in r:
+            log.info(
+                "%s: R_cam_imu %s deg from nominal (%d pairs, well conditioned: %s), time offset %+.0f ms",
+                sequence_id,
+                _deg(r["angle_to_nominal_deg"]),
+                r["num_pairs"],
+                r["well_conditioned"],
+                r["time_offset_ms"],
+            )
     return StageOutput(
         artifacts=dict(ARTIFACTS),
         metrics={
@@ -128,6 +195,8 @@ def run_align(
             "floor_detected": floor_report["detected"],
             "floor_tilt_deg": floor_report["tilt_to_gravity_deg"],
             "num_registered": report["num_registered"],
+            "yaw_applied": report["manhattan"]["applied"],
+            "yaw_confidence": report["manhattan"]["confidence"],
         },
         warnings=list(warnings),
     )
