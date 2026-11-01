@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Literal
 
 import cv2
 import numpy as np
@@ -146,15 +147,24 @@ def plot_histogram(
 
 
 def plot_trajectory_topdown(
-    centres: np.ndarray, points: np.ndarray, path: Path, max_points: int = 50_000, seed: int = 0
+    centres: np.ndarray,
+    points: np.ndarray,
+    path: Path,
+    max_points: int = 50_000,
+    seed: int = 0,
+    axes: Literal["pca", "xy"] = "pca",
 ) -> Path:
-    """Camera centres (in order, coloured by index) over the points, projected onto the two main axes of the centres."""
+    """Camera centres (in order, coloured by index) over the points, seen from above: projected onto the two main axes
+    of the centres (`pca`, any model frame) or onto the x/y plane (`xy`, a Z-up world frame)."""
     centres, points = np.asarray(centres, dtype=float), np.asarray(points, dtype=float).reshape(-1, 3)
-    mean = centres.mean(axis=0)
-    _, _, axes = np.linalg.svd(centres - mean, full_matrices=False)
+    if axes == "xy":
+        mean, basis = np.zeros(3), np.eye(3)
+    else:
+        mean = centres.mean(axis=0)
+        _, _, basis = np.linalg.svd(centres - mean, full_matrices=False)
 
     def to_2d(xyz: np.ndarray) -> np.ndarray:
-        return (xyz - mean) @ axes[:2].T
+        return (xyz - mean) @ basis[:2].T
 
     if len(points) > max_points:
         points = points[np.random.default_rng(seed).choice(len(points), max_points, replace=False)]
@@ -171,7 +181,27 @@ def plot_trajectory_topdown(
     ax.plot(*c2[0], "o", ms=8, mfc="none", color="tab:green", label="first")
     fig.colorbar(sc, ax=ax, label="keyframe")
     ax.set_aspect("equal")
-    ax.set_xlabel("main axis 1")
-    ax.set_ylabel("main axis 2")
+    ax.set_xlabel("x" if axes == "xy" else "main axis 1")
+    ax.set_ylabel("y" if axes == "xy" else "main axis 2")
+    ax.legend(loc="upper right")
+    return _save(fig, path)
+
+
+def plot_height_histogram(
+    z: np.ndarray, floor_z: float | None, camera_z: np.ndarray, path: Path, bins: int = 200
+) -> Path:
+    """Histogram of point heights (1st–99th percentile), the camera heights as a rug and the floor height."""
+    z, camera_z = np.asarray(z, dtype=float), np.asarray(camera_z, dtype=float)
+    fig = Figure(figsize=(7, 4))
+    ax = fig.subplots()
+    if len(z):
+        lo, hi = np.percentile(np.concatenate([z, camera_z]), [1, 99])
+        ax.hist(z[(z >= lo) & (z <= hi)], bins=bins, color="tab:gray", label="points")
+    ax.plot(camera_z, np.zeros_like(camera_z), "|", ms=12, color="tab:blue", label="cameras")
+    if floor_z is not None:
+        ax.axvline(floor_z, color="tab:red", lw=1.0, ls="--", label=f"floor z = {floor_z:.3g}")
+    ax.set_title("point heights")
+    ax.set_xlabel("z (up)")
+    ax.set_ylabel("count")
     ax.legend(loc="upper right")
     return _save(fig, path)

@@ -123,7 +123,7 @@ def _run(capture, root, *args):
 def test_resume_skips_sfm(tiny_capture, output_root, sfm_run):
     mtime = (sfm_run / "stage_manifest.json").stat().st_mtime_ns
     run_id = sfm_run.parent.name
-    assert _run(tiny_capture, output_root, "--resume", run_id) == 0
+    assert _run(tiny_capture, output_root, "--resume", run_id, "--to", "sfm") == 0
     stages = read_json(sfm_run.parent / "run_manifest.json")["stages"]
     assert [(s["stage"], s["status"]) for s in stages] == [
         ("ingest", "skipped"),

@@ -4,20 +4,18 @@ import contextlib
 import logging
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pandas as pd
 import pycolmap
 
 from recon.io.colmap import camera_intrinsics, link_image_root, parse_image_name, write_model
-from recon.io.tables import read_csv, read_json, write_csv, write_json
+from recon.io.tables import write_csv, write_json
 from recon.pipeline.device import Backend
-from recon.pipeline.run_dir import read_manifest, stage_dir
 from recon.pipeline.stage import Stage, StageOutput, register_stage
-from recon.pipeline.stages import s01_ingest, s02_keyframes
+from recon.pipeline.stages import s02_keyframes
+from recon.pipeline.stages.common import gravity_vectors, read_keyframe_inputs
 from recon.report import plots
 from recon.sfm import SfmOptions
 from recon.sfm.features import extract_features
@@ -26,7 +24,6 @@ from recon.sfm.matching import match_features, num_verified_pairs, resolve_strat
 from recon.sfm.priors import (
     PAIR_CHECKS,
     PAIR_FILTER_COLUMNS,
-    GyroRotations,
     filter_pairs,
     pair_rotation_errors,
     write_gravity_priors,
@@ -82,45 +79,6 @@ def _colmap_log(log_file: Path | None) -> Iterator[None]:
         glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = saved
 
 
-@dataclass(slots=True)
-class SceneInputs:
-    """What SfM reads from every sequence: keyframes, their gravity priors and the gyro rotations."""
-
-    images: pd.DataFrame  # image_name, sequence_id, idx, t_ns; sorted by name
-    image_dirs: dict[str, Path]  # sequence_id -> keyframe image dir
-    gravity: pd.DataFrame  # gravity_cam.csv rows of every sequence
-    gyro: dict[str, GyroRotations]  # sequences that have gyro rotations
-
-    @property
-    def names(self) -> list[str]:
-        return self.images["image_name"].tolist()
-
-
-def _read_inputs(sequence_dirs: dict[str, Path]) -> SceneInputs:
-    images, gravity, image_dirs, gyro = [], [], {}, {}
-    for sequence_id, sequence_dir in sequence_dirs.items():
-        keyframes = stage_dir(sequence_dir, s02_keyframes.DIR_NAME)
-        table = read_csv(keyframes / s02_keyframes.ARTIFACTS["keyframes"], s02_keyframes.KEYFRAMES_COLUMNS)
-        images.append(table[["image_name", "idx", "t_ns"]].assign(sequence_id=sequence_id))
-        image_dirs[sequence_id] = keyframes / s02_keyframes.ARTIFACTS["images"]
-        gravity.append(read_csv(keyframes / s02_keyframes.ARTIFACTS["gravity_priors"], s02_keyframes.GRAVITY_COLUMNS))
-        ingest = stage_dir(sequence_dir, s01_ingest.DIR_NAME)
-        if "frame_rotations" in read_manifest(ingest).artifacts:
-            R_cum = np.load(ingest / s01_ingest.ARTIFACTS["frame_rotations"])["R_cum"]
-            info = read_json(ingest / s01_ingest.ARTIFACTS["sequence"])
-            R_cam_imu = np.asarray(info["extrinsics"][s02_keyframes.CAMERA_ID]["R_cam_imu"])
-            gyro[sequence_id] = GyroRotations(R_cum, R_cam_imu)
-    table = pd.concat(images, ignore_index=True).sort_values("image_name", ignore_index=True)
-    return SceneInputs(table, image_dirs, pd.concat(gravity, ignore_index=True), gyro)
-
-
-def _gravity_vectors(gravity: pd.DataFrame, min_conf: float) -> dict[str, np.ndarray]:
-    rows = gravity.dropna(subset=["gx", "gy", "gz", "conf"])
-    rows = rows[rows["conf"] >= min_conf]
-    vectors = rows[["gx", "gy", "gz"]].to_numpy(dtype=float)
-    return dict(zip(rows["image_name"], vectors))
-
-
 def _camera_keys(rec: pycolmap.Reconstruction) -> dict[int, str]:
     """camera_id -> `<sequence_id>/<camera_id>`, from the image folder each camera was made for."""
     keys = {}
@@ -164,10 +122,10 @@ def run_sfm(
     database = out / ARTIFACTS["database"]
     timings, warnings = {}, []
 
-    inputs = _read_inputs(sequence_dirs)
+    inputs = read_keyframe_inputs(sequence_dirs)
     names = inputs.names
     image_root = link_image_root(out / IMAGE_ROOT, inputs.image_dirs)
-    gravity = _gravity_vectors(inputs.gravity, priors.gravity_min_conf)
+    gravity = gravity_vectors(inputs.gravity, priors.gravity_min_conf)
     log.warning("no intrinsics prior: the focal length starts from COLMAP's guess and is refined (calibrate instead)")
 
     with _colmap_log(log_file):

@@ -175,6 +175,13 @@ def _check_requirements(stage: Stage, selected: set[str]) -> None:
     for name in stage.requires:
         if name in selected:
             continue
+        if get_stage(name).scope == "scene":
+            manifest = read_manifest(stage.ctx.stage_dir(name))
+            if manifest is None or manifest.status != "success":
+                raise PipelineError(
+                    f"{stage.name} needs a successful {name} in run {stage.ctx.run_dir.name}: run `recon {name}` first"
+                )
+            continue
         sids = [stage.sequence_id] if stage.scope == "sequence" else stage.ctx.sequence_ids
         for sid in sids:
             manifest = read_manifest(stage.ctx.stage_dir(name, sid))

@@ -55,11 +55,11 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm)
+pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm, align)
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
 ```bash
 pixi run recon run --input data/room2_tiny --resume                    # the latest run
 pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
@@ -78,7 +78,7 @@ pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`). Unknown keys and wrong types are errors that name the full key path.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`). Unknown keys and wrong types are errors that name the full key path.
 
 **GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) follows `device.preference`. Each stage manifest records the backends it used under `backends`.
 
@@ -144,6 +144,23 @@ ls $D/sparse $D/reports/plots/       # raw, refined, refined_txt; track_len_hist
 pixi run colmap gui --database_path $D/database.db --image_path $D/images --import_path $D/sparse/refined
 ```
 `reports/pair_filter.csv` lists every verified pair with its check (`gyro`, `tilt`, `none`), angle error and whether it was removed; `gravity_spread_deg` in the report is how far the registered cameras' gravity directions spread around their mean in the model (small = model and IMU agree). `intrinsics.json` and `sparse_points.ply` (coloured sparse points) come from the refined model; `images/` holds one symlink per sequence to its keyframe images (the COLMAP image root).
+
+### Step 4: align
+Needs a finished SfM (`recon sfm` first, or use `recon run`).
+```bash
+pixi run recon align --input data/room2_tiny
+pixi run recon align --input data/room2_tiny --force --set align.gravity.method=camera_up   # without the IMU
+```
+Same as `recon run --only align --resume`: like `recon sfm` it continues in the latest run (`--resume RUN_ID` picks another, `--force` re-runs it). It moves the refined SfM model (`03_sfm/sparse/refined`) into the world frame W: **Z up, gravity along −Z, the floor at z = 0, the origin under the median camera position**. Units stay those of the SfM model (`units: "arbitrary"`; no metric scale yet). Gravity is always estimated, never read off the model's axes: each registered keyframe's IMU gravity (`priors/gravity_cam.csv`, confidence ≥ `align.gravity.min_conf`) is rotated into the model, and their confidence-weighted mean, made robust with a Huber reweighting (`huber_deg`), is rotated onto −Z (`align.gravity.method: imu`). Without enough priors (`auto`: fewer than 3, or fewer than `min_prior_frac` of the registered keyframes) or with `method: camera_up`, the mean image-down direction of the cameras is used instead and replaced by the floor normal (a warning says so). The floor is the lowest big peak of the point-height histogram below the cameras, fitted with RANSAC and least squares (`align.floor.*`; distances are fractions of the scene size since the units are arbitrary; RANSAC is seeded with `run.seed`); a floor normal within `max_tilt_correction_deg` (2°) of gravity is rotated onto Z. No floor → z = 0 at the 2nd percentile of the point heights, with a warning. Writes `outputs/room2_tiny/runs/<run_id>/04_alignment/`: the aligned model `sparse_aligned/` (**the model later steps use**) and `sparse_aligned_txt/`, `sparse_points_aligned.ply` (coloured), `transform.json` (`W_from_sfm` as scale/R/t with `x_W = scale · R · x_sfm + t`, and the `steps` it is composed of, applied in list order), `trajectory_tum/<sequence_id>.txt` (TUM `t tx ty tz qx qy qz qw`, camera-to-world, t in seconds on the capture clock of that sequence) and the report. Keys: `align.gravity.{method, huber_deg, min_conf, min_prior_frac, max_residual_deg}`, `align.floor.{enabled, min_inlier_frac, max_normal_deg, cameras_above_frac, max_tilt_correction_deg, fallback_max_deg, bin_frac, ransac_iterations, max_reproj_px, min_track_len}`.
+
+Results to look at:
+```bash
+D=$(ls -d outputs/room2_tiny/runs/*/04_alignment | tail -1)
+cat $D/stage_manifest.json $D/reports/alignment_report.json $D/transform.json
+head $D/trajectory_tum/*.txt
+ls $D/reports/plots/        # gravity_residuals, height_hist (floor line, cameras), trajectory_topdown (W x/y)
+```
+In the report, `gravity.residual_median_deg` is how far the keyframes' IMU gravity is from −Z after alignment (about 1°: the image-vs-IMU noise), `floor.tilt_to_gravity_deg` the angle between the floor normal and the IMU gravity before it was corrected, and `gravity.down_vs_model_y_deg` how far the SfM model's +y was from gravity. Open `sparse_aligned_txt/` or the PLY in a viewer (e.g. MeshLab): the floor is flat at z = 0 with Z up.
 
 ### Tests
 ```bash

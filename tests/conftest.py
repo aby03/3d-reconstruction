@@ -41,3 +41,13 @@ def sfm_run(pipeline_run) -> Path:
     result = run_stages(pipeline_run, [SfmStage])
     assert result.status == "success", result.error
     return pipeline_run.stage_dir("sfm")
+
+
+@pytest.fixture(scope="session")
+def align_run(pipeline_run, sfm_run) -> Path:
+    """align on the model of `sfm_run`, once per session; returns its stage dir."""
+    from recon.pipeline.stages.s04_align import AlignStage
+
+    result = run_stages(pipeline_run, [AlignStage])
+    assert result.status == "success", result.error
+    return pipeline_run.stage_dir("align")

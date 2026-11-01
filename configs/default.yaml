@@ -89,3 +89,22 @@ sfm:
     min_track_len: 3             # points seen in fewer keyframes are removed
     min_tri_angle_deg: 1.5       # points with a smaller triangulation angle are removed
     min_image_obs: 15            # images observing fewer points are deregistered first (their pose is unconstrained)
+
+align:                           # world frame W: Z up, gravity -Z, floor z = 0, origin under the median camera
+  gravity:
+    method: auto                 # auto (imu when enough priors, else camera_up) | imu | camera_up (image-down + floor)
+    huber_deg: 3.0               # IRLS Huber threshold on the angle to the mean down direction
+    min_conf: 0.3                # gravity priors below this confidence are left out
+    min_prior_frac: 0.2          # auto: imu needs priors on at least this fraction of the registered images
+    max_residual_deg: 5.0        # warn above this median residual (R_cam_imu, time offset or model suspect)
+  floor:
+    enabled: true
+    min_inlier_frac: 0.05        # the floor peak holds at least this fraction of the points
+    max_normal_deg: 10.0         # floor plane normal within this of up
+    cameras_above_frac: 0.9      # the floor lies below at least this fraction of the cameras
+    max_tilt_correction_deg: 2.0 # rotate the floor normal onto up when it is within this of gravity
+    fallback_max_deg: 15.0       # camera_up: the floor normal may be this far from the image-down estimate
+    bin_frac: 0.01               # histogram bin, as a fraction of the scene extent (units are arbitrary)
+    ransac_iterations: 1000
+    max_reproj_px: 1.5           # floor candidates: points with a smaller error
+    min_track_len: 3             #   and a longer track

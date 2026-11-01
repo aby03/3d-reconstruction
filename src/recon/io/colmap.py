@@ -1,4 +1,4 @@
-"""COLMAP helpers on top of pycolmap: symlinked image roots, image names, camera intrinsics, model files."""
+"""COLMAP helpers on top of pycolmap: symlinked image roots, image names, camera intrinsics, model files, Sim3."""
 
 import os
 import shutil
@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import pycolmap
+
+from recon.core.geometry import Sim3
 
 # (fx, fy, cx, cy, k1, k2, p1, p2) positions in `Camera.params`, None where the model lacks the parameter
 _PARAM_INDEX = {
@@ -63,3 +65,8 @@ def write_model(rec: pycolmap.Reconstruction, path: Path, text: bool = False) ->
     path.mkdir(parents=True, exist_ok=True)
     rec.write_text(path) if text else rec.write_binary(path)
     return path
+
+
+def to_sim3d(sim3: Sim3) -> pycolmap.Sim3d:
+    """`sim3` as a pycolmap `Sim3d`, e.g. for `Reconstruction.transform`."""
+    return pycolmap.Sim3d(sim3.scale, pycolmap.Rotation3d(sim3.R), sim3.t)
