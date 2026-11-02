@@ -17,6 +17,7 @@ class RunContext:
     config: PipelineConfig
     logger: logging.Logger
     device: DeviceInfo | None = None  # probed on the first backend() call that needs it
+    hardware: str | None = None  # name of the hardware preset in `config`
 
     @property
     def sequence_ids(self) -> list[str]:

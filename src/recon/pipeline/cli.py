@@ -9,7 +9,7 @@ from typing import Any
 
 from recon.capture.open_camera_sensors import OpenCameraSensorsLoader
 from recon.io.tables import to_jsonable
-from recon.pipeline.config import ConfigError, PipelineConfig, load_config
+from recon.pipeline.config import ConfigError, PipelineConfig, load_config, resolve_hardware
 from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, tool_versions
 from recon.pipeline.run_dir import latest_run_dir, read_manifest, setup_logging
 from recon.pipeline.runner import PipelineError, open_run, run_stages, scene_path, select_stages
@@ -64,8 +64,12 @@ def _overrides(args: argparse.Namespace) -> list[str]:
     return overrides
 
 
-def _config(args: argparse.Namespace) -> PipelineConfig:
-    return load_config(args.config, _overrides(args))
+def _hardware(args: argparse.Namespace) -> str | None:
+    return resolve_hardware(args.hardware, args.config, _overrides(args))
+
+
+def _config(args: argparse.Namespace, hardware: str | None = None) -> PipelineConfig:
+    return load_config(args.config, _overrides(args), hardware or "none")
 
 
 def _run(
@@ -76,9 +80,10 @@ def _run(
     force: str | None,
     resume: str | None = None,
 ) -> int:
-    config = _config(args)
+    hardware = _hardware(args)
+    config = _config(args, hardware)
     stages = select_stages(from_, to, only)
-    ctx = open_run(args.input, config, args.scene, resume)
+    ctx = open_run(args.input, config, args.scene, resume, hardware)
     try:
         result = run_stages(ctx, stages, force)
     except KeyboardInterrupt:
@@ -150,6 +155,12 @@ def _add_config_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         metavar="KEY=VALUE",
         help="override one config key, e.g. keyframes.uniform_fps=2",
+    )
+    parser.add_argument(
+        "--hardware",
+        default="auto",
+        metavar="PRESET",
+        help="configs/hardware/<PRESET>.yaml under the config files; auto (default): picked by GPU memory; none",
     )
 
 

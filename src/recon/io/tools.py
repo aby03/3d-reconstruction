@@ -73,8 +73,12 @@ class _VramSampler:
         return max(self.peak - self.baseline, 0)
 
 
-def _tail(path: Path, lines: int = LOG_TAIL_LINES) -> str:
-    return "\n".join(path.read_text(errors="replace").splitlines()[-lines:])
+def _tail(path: Path, start: int = 0, lines: int = LOG_TAIL_LINES) -> str:
+    """The last `lines` lines of `path` after byte `start`."""
+    with path.open("rb") as f:
+        f.seek(start)
+        text = f.read().decode(errors="replace")
+    return "\n".join(text.splitlines()[-lines:])
 
 
 class ToolRunner:
@@ -113,8 +117,8 @@ class ToolRunner:
             shutil.move(path, self.log_dir / path.name)
 
     def run(self, tool: str, args: list[str], cwd: Path, timeout_s: float | None = None) -> ToolResult:
-        """Run `tool args` in `cwd`. A non-zero exit raises ToolError; after `timeout_s` the tool is killed
-        and ToolTimeout raised."""
+        """Run `tool args` in `cwd`. A non-zero exit raises ToolError (with the tail of this call's output); after
+        `timeout_s` the tool is killed and ToolTimeout raised."""
         argv = [str(self.which(tool)), *map(str, args)]
         self.log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self.log_dir / f"{tool}.log"
@@ -122,6 +126,7 @@ class ToolRunner:
         with log_path.open("a") as log:
             log.write(f"\n$ cd {cwd} && {shlex.join(argv)}\n")
             log.flush()
+            start = log.tell()
             sampler = _VramSampler(self.gpu_index) if self.sample_vram else None
             t0 = time.perf_counter()
             process = subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT)
@@ -143,7 +148,8 @@ class ToolRunner:
         result = ToolResult(tool, argv, process.returncode, round(duration, 3), peak, log_path)
         self.results.append(result)
         if timed_out:
-            raise ToolTimeout(tool, process.returncode, _tail(log_path), f"{tool} killed after {timeout_s:.0f} s")
+            message = f"{tool} killed after {timeout_s:.0f} s"
+            raise ToolTimeout(tool, process.returncode, _tail(log_path, start), message)
         if process.returncode != 0:
-            raise ToolError(tool, process.returncode, _tail(log_path))
+            raise ToolError(tool, process.returncode, _tail(log_path, start))
         return result

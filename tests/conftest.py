@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from recon.pipeline.config import load_config
+from recon.pipeline.config import load_config, resolve_hardware
 from recon.pipeline.context import RunContext
 from recon.pipeline.runner import open_run, run_stages, select_stages
 
@@ -26,8 +26,11 @@ def output_root(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def pipeline_run(tiny_capture, output_root) -> RunContext:
-    """ingest → keyframes on the tiny clip through the runner, once per session; later steps read its stage dirs."""
-    ctx = open_run(tiny_capture, load_config(overrides=[f"run.output_root={output_root}"]), SCENE)
+    """ingest → keyframes on the tiny clip through the runner, once per session; later steps read its stage dirs.
+    The config is the CLI's: the defaults with the hardware preset picked for this machine."""
+    overrides = [f"run.output_root={output_root}"]
+    hardware = resolve_hardware("auto", overrides=overrides)
+    ctx = open_run(tiny_capture, load_config(overrides=overrides, hardware=hardware or "none"), SCENE, None, hardware)
     result = run_stages(ctx, select_stages(to="keyframes"))
     assert result.status == "success", result.error
     return ctx

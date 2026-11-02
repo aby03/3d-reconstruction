@@ -1,4 +1,5 @@
-"""Pipeline config: `configs/default.yaml`, `--config` files, then `--set a.b=c`, validated into option dataclasses."""
+"""Pipeline config: `configs/default.yaml`, a hardware preset, `--config` files, then `--set a.b=c`, validated into
+option dataclasses."""
 
 import dataclasses
 import hashlib
@@ -16,11 +17,14 @@ from recon.capture.open_camera_sensors import LoaderOptions
 from recon.dense import DenseOptions
 from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
-from recon.pipeline.device import DeviceOptions
+from recon.pipeline.device import DeviceInfo, DeviceOptions, Preference, probe_device
 from recon.sensors.sync import SyncOptions
 from recon.sfm import SfmOptions
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "default.yaml"
+HARDWARE_DIR = DEFAULT_CONFIG.parent / "hardware"
+LARGE_VRAM_MB = 10 * 1024
+MIN_VRAM_MB = 4 * 1024
 
 
 class ConfigError(ValueError):
@@ -100,9 +104,47 @@ def validate_config(data: dict) -> PipelineConfig:
     return PipelineConfig(**{name: _validate_section(name, cls, data.get(name, {})) for name, cls in SECTIONS.items()})
 
 
-def load_config(config_files: Sequence[Path] = (), overrides: Sequence[str] = ()) -> PipelineConfig:
-    """Merge the default config, `config_files` and `overrides` (later wins), then validate. Unknown keys are errors."""
+def hardware_presets() -> list[str]:
+    return sorted(p.stem for p in HARDWARE_DIR.glob("*.yaml"))
+
+
+def select_hardware(info: DeviceInfo, preference: Preference = "auto") -> str | None:
+    """The preset for this machine: `cpu` without CUDA OpenMVS (or when the CPU is asked for), else by VRAM
+    (`cuda_large` from 10 GB, `cuda_6gb` from 4 GB); None below 4 GB (the defaults)."""
+    if preference == "cpu" or not info.has("dense"):
+        return "cpu"
+    if info.vram_mb is not None and info.vram_mb >= LARGE_VRAM_MB:
+        return "cuda_large"
+    if info.vram_mb is None or info.vram_mb >= MIN_VRAM_MB:
+        return "cuda_6gb"
+    return None
+
+
+def resolve_hardware(
+    hardware: str = "auto", config_files: Sequence[Path] = (), overrides: Sequence[str] = ()
+) -> str | None:
+    """The preset name `hardware` stands for: `auto` picks one with `select_hardware` (honouring `device` from the
+    config files and overrides), `none` none, anything else must name a file in `configs/hardware/`."""
+    if hardware == "none":
+        return None
+    if hardware == "auto":
+        device = load_config(config_files, overrides).device
+        if device.preference == "cpu":
+            return select_hardware(DeviceInfo(), "cpu")
+        return select_hardware(probe_device(device.gpu_index), device.preference)
+    if hardware not in hardware_presets():
+        raise ConfigError(f"unknown hardware preset {hardware!r}; known: auto, none, {', '.join(hardware_presets())}")
+    return hardware
+
+
+def load_config(
+    config_files: Sequence[Path] = (), overrides: Sequence[str] = (), hardware: str = "none"
+) -> PipelineConfig:
+    """Merge the default config, the hardware preset (`resolve_hardware`), `config_files` and `overrides` (later
+    wins), then validate. Unknown keys are errors."""
     data = _read_yaml(DEFAULT_CONFIG)
+    if (preset := resolve_hardware(hardware, config_files, overrides)) is not None:
+        data = _merge(data, _read_yaml(HARDWARE_DIR / f"{preset}.yaml"))
     for path in config_files:
         data = _merge(data, _read_yaml(path))
     for text in overrides:

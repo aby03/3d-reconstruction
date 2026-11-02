@@ -85,12 +85,17 @@ def _resumed_run_dir(scene_root: Path, resume: str, inputs: dict[str, Path]) -> 
 
 
 def open_run(
-    input_dir: Path | str, config: PipelineConfig, scene: str | None = None, resume: str | None = None
+    input_dir: Path | str,
+    config: PipelineConfig,
+    scene: str | None = None,
+    resume: str | None = None,
+    hardware: str | None = None,
 ) -> RunContext:
     """Open a run dir for one capture under `<output_root>/<scene>/` and log to its `logs/pipeline.log`.
 
     Without `resume` the run is new. `resume` (a run id, or "latest" for the newest run) reuses that run dir,
     so its scene stages can be skipped when up to date; it must have been made for the same sequences.
+    `hardware` is the name of the preset in `config` (recorded in the run manifest and `config.resolved.yaml`).
     """
     files = discover_files(input_dir)
     scene_root = scene_dir(config.run.output_root, scene or files.root.name)
@@ -99,8 +104,11 @@ def open_run(
     setup_logging(run_path / "logs" / "pipeline.log")
     if resume is not None:
         log.info("resuming run %s", run_path.name)
-    (run_path / "config.resolved.yaml").write_text(dump_config(config))
-    return RunContext(scene_dir=scene_root, run_dir=run_path, inputs=inputs, config=config, logger=log)
+    header = f"# hardware preset: {f'configs/hardware/{hardware}.yaml' if hardware else 'none'}\n"
+    (run_path / "config.resolved.yaml").write_text(header + dump_config(config))
+    return RunContext(
+        scene_dir=scene_root, run_dir=run_path, inputs=inputs, config=config, logger=log, hardware=hardware
+    )
 
 
 def _upstream_hashes(stage: Stage) -> dict[str, str | None]:
@@ -207,6 +215,7 @@ def run_stages(ctx: RunContext, stages: list[type[Stage]], force: str | None = N
                 "started": started,
                 "finished": now_iso(),
                 "sequences": {sid: {"input": path} for sid, path in ctx.inputs.items()},
+                "hardware": ctx.hardware,
                 "stages": [asdict(r) for r in result.stages],
                 "error": result.error,
             },

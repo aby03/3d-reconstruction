@@ -144,3 +144,15 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     close_holes: 30              # close holes up to this many edges (0: off)
     smooth: 2                    # smoothing iterations
     decimate: 1.0                # 1: no decimation
+  refine:                        # RefineMesh -> mesh_refined.ply (disabled or timed out: a copy of mesh_raw.ply)
+    enabled: true
+    use_cuda: false              # true: follows device.preference (room2: CPU 16.7 min, CUDA 20.3 min + 3.2 GB VRAM)
+    resolution_level: 1
+    max_face_area: 16            # faces larger than this (px, in any image pair) are subdivided
+    scales: 2
+    regularity_weight: 0.2       # photo-consistency vs smoothness (higher: flatter walls)
+    max_minutes: 45              # killed after this; the raw mesh is kept
+  preview:                       # TextureMesh at low resolution into preview/ (seam leveling off)
+    enabled: true
+    resolution_level: 2
+    min_resolution: 320

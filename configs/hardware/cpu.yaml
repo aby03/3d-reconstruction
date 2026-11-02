@@ -1,0 +1,5 @@
+# No usable CUDA: everything on the CPU, depth maps at a quarter of the image size (464 px on 1857 px images).
+device:
+  preference: cpu
+dense:
+  openmvs: {resolution_level: 2, min_resolution: 464}

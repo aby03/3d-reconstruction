@@ -1,5 +1,7 @@
-"""Step 5: undistort the aligned model, densify it with OpenMVS and mesh the dense cloud, in world W, in `05_dense/`."""
+"""Step 5: undistort the aligned model, densify it with OpenMVS, mesh, refine and preview-texture the mesh, in
+world W, in `05_dense/`."""
 
+import dataclasses
 import logging
 import os
 import shutil
@@ -7,11 +9,25 @@ import time
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import pycolmap
 
 from recon.dense import DenseOptions
-from recon.dense.openmvs import DENSIFY, cuda_device, densify, import_colmap, reconstruct_mesh
+from recon.dense.openmvs import (
+    DENSIFY,
+    REFINED_PLY,
+    REFINE_MESH,
+    DensifyResult,
+    MeshResult,
+    OomRetry,
+    cuda_device,
+    densify,
+    import_colmap,
+    reconstruct_mesh,
+    refine_mesh,
+    texture_preview,
+)
 from recon.dense.undistort import undistort
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
 from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points, write_points
@@ -43,10 +59,17 @@ ARTIFACTS = {
     "mesh_openmvs": f"{WORK_DIR}/scene_dense_mesh.ply",
     "dense_points": "dense_points.ply",
     "mesh_raw": "mesh_raw.ply",
+    "mesh_refined": "mesh_refined.ply",
     "report": "reports/dense_report.json",
     "plot_height": "reports/plots/dense_height_hist.png",
     "plot_topdown": "reports/plots/dense_topdown.png",
 }
+# written only when refine ran / the preview is enabled
+OPTIONAL_ARTIFACTS = {
+    "mesh_refine_openmvs": f"{WORK_DIR}/{REFINED_PLY}",
+    "preview": "preview/mesh.obj",
+}
+PREVIEW_DIR = "preview"
 
 
 def _inside_frac(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray]) -> float:
@@ -70,6 +93,46 @@ def _cloud_stats(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray], diag: floa
     }
 
 
+def _mesh_report(mesh, box: tuple[np.ndarray, np.ndarray]) -> dict[str, Any]:
+    return {**mesh_stats(mesh), "inside_sparse_bbox_frac": _inside_frac(np.asarray(mesh.vertices), box)}
+
+
+def _preview_report(obj: Path) -> dict[str, Any]:
+    faces = uvs = 0
+    with obj.open() as f:
+        for line in f:
+            faces += line.startswith("f ")
+            uvs += line.startswith("vt ")
+    atlases = sorted(p for p in obj.parent.iterdir() if p.suffix.lower() in (".jpg", ".png"))
+    size = list(cv2.imread(str(atlases[0])).shape[1::-1]) if atlases else None
+    return {"faces": faces, "texture_coords": uvs, "textures": len(atlases), "atlas_size": size}
+
+
+def _tool_rows(runner: ToolRunner, out: Path) -> dict[str, dict[str, Any]]:
+    """One row per tool; a retried tool sums its durations and keeps the worst VRAM peak and the last status."""
+    rows: dict[str, dict[str, Any]] = {}
+    for r in runner.results:
+        row = rows.setdefault(r.tool, {"calls": 0, "duration_s": 0.0, "peak_vram_mb": None})
+        row["calls"] += 1
+        row["duration_s"] = round(row["duration_s"] + r.duration_s, 3)
+        if r.peak_vram_mb is not None:
+            row["peak_vram_mb"] = max(row["peak_vram_mb"] or 0, r.peak_vram_mb)
+        row["returncode"] = r.returncode
+        row["log"] = os.path.relpath(r.log_path, out.parent)
+    return rows
+
+
+def _retry_warning(retry: OomRetry) -> str:
+    if retry.cpu_fallback:
+        return f"oom_cpu_fallback: {retry.tool}"
+    return f"oom_retry: {retry.tool} at level {retry.from_level} -> {retry.to_level}"
+
+
+def _backend(result: DensifyResult | MeshResult | None, backend: Backend) -> Backend:
+    """The backend a tool really ran on: the CPU after an OOM fallback."""
+    return "cpu" if result is not None and result.cuda_device < 0 else backend
+
+
 def run_dense(
     align_dir: Path,
     sfm_dir: Path,
@@ -78,11 +141,16 @@ def run_dense(
     runner: ToolRunner,
     backend: Backend = "cuda",
     gpu_index: int = 0,
+    cpu_fallback: bool = False,
+    hardware: str | None = None,
 ) -> StageOutput:
     """Run step 5 on the aligned model of the align stage dir `align_dir` (images from the sfm stage dir
-    `sfm_dir`), writing into the stage dir `out`; the OpenMVS tools run through `runner`."""
+    `sfm_dir`), writing into the stage dir `out`; the OpenMVS tools run through `runner`. `cpu_fallback`: a
+    CUDA tool that runs out of memory (after the lower-resolution retry for densify) runs again on the CPU;
+    `hardware` (the config's preset name) only goes into the report."""
     options = options or DenseOptions()
     timings, warnings = {}, []
+    artifacts = dict(ARTIFACTS)
 
     t0 = time.perf_counter()
     model_dir = align_dir / s04_align.ARTIFACTS["model"]
@@ -113,19 +181,45 @@ def run_dense(
 
     t0 = time.perf_counter()
     device = cuda_device(backend, gpu_index)
-    dense = densify(runner, work_dir, options.openmvs, device, long_side)
+    dense = densify(runner, work_dir, options.openmvs, device, long_side, cpu_fallback)
     timings["densify"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    mesh = reconstruct_mesh(runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi)
+    mesh = reconstruct_mesh(runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi, cpu_fallback)
     timings["mesh"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    refine_backend: Backend = backend if options.refine.use_cuda else "cpu"
+    refine_device = cuda_device(refine_backend, gpu_index)
+    refined = None
+    if options.refine.enabled:
+        refined = refine_mesh(runner, work_dir, options.refine, refine_device, cpu_fallback)
+        if refined.timed_out:
+            warnings.append(
+                f"{REFINE_MESH} stopped after {options.refine.max_minutes:g} min; mesh_refined.ply is the raw mesh"
+            )
+        else:
+            artifacts["mesh_refine_openmvs"] = OPTIONAL_ARTIFACTS["mesh_refine_openmvs"]
+    refined_ply = refined.ply if refined is not None and refined.ply is not None else mesh.ply
+    shutil.copyfile(refined_ply, out / ARTIFACTS["mesh_refined"])
+    timings["refine"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    preview = None
+    if options.preview.enabled:
+        preview = texture_preview(
+            runner, work_dir, refined_ply.name, out / PREVIEW_DIR, options.preview, device, cpu_fallback
+        )
+        artifacts["preview"] = OPTIONAL_ARTIFACTS["preview"]
+    timings["preview"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     xyz, normals, rgb, _ = read_openmvs_points(dense.ply)
     write_points(out / ARTIFACTS["dense_points"], xyz, normals, rgb)
     shutil.copyfile(mesh.ply, out / ARTIFACTS["mesh_raw"])
-    raw_mesh = read_mesh(out / ARTIFACTS["mesh_raw"])
-    mesh_raw = {**mesh_stats(raw_mesh), "inside_sparse_bbox_frac": _inside_frac(np.asarray(raw_mesh.vertices), box)}
+    mesh_raw = _mesh_report(read_mesh(out / ARTIFACTS["mesh_raw"]), box)
+    ran = refined is not None and refined.ply is not None
+    mesh_refined = _mesh_report(read_mesh(out / ARTIFACTS["mesh_refined"]), box) if ran else dict(mesh_raw)
     dense_stats = _cloud_stats(xyz, box, diag)
     plots.plot_height_histogram(xyz[:, 2], 0.0, centres[:, 2], out / ARTIFACTS["plot_height"])
     plots.plot_trajectory_topdown(centres, xyz, out / ARTIFACTS["plot_topdown"], axes="xy")
@@ -135,27 +229,23 @@ def run_dense(
         warnings.append(f"only {len(xyz)} dense points")
     if dense.num_points != len(xyz):
         warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {len(xyz)}")
-    for name, stats in (("dense cloud", dense_stats), ("raw mesh", mesh_raw)):
+    retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
+    warnings += [_retry_warning(r) for r in retries]
+    meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
+    for name, stats in [("dense cloud", dense_stats), *meshes]:
         frac = stats["inside_sparse_bbox_frac"]
         if frac < MIN_INSIDE_FRAC:
             warnings.append(f"{name}: {frac:.1%} of the vertices inside the sparse bbox (< {MIN_INSIDE_FRAC:.0%})")
-    if mesh_raw["largest_component_frac"] < MIN_LARGEST_COMPONENT_FRAC:
-        warnings.append(
-            f"raw mesh: largest component has {mesh_raw['largest_component_frac']:.1%} of the faces"
-            f" ({mesh_raw['components']} components)"
-        )
+    for name, stats in meshes:
+        if stats["largest_component_frac"] < MIN_LARGEST_COMPONENT_FRAC:
+            warnings.append(
+                f"{name}: largest component has {stats['largest_component_frac']:.1%} of the faces"
+                f" ({stats['components']} components)"
+            )
     for warning in warnings:
         log.warning(warning)
 
-    tools = {
-        r.tool: {
-            "duration_s": r.duration_s,
-            "peak_vram_mb": r.peak_vram_mb,
-            "returncode": r.returncode,
-            "log": os.path.relpath(r.log_path, out.parent),
-        }
-        for r in runner.results
-    }
+    tools = _tool_rows(runner, out)
     vram = [r.peak_vram_mb for r in runner.results if r.peak_vram_mb is not None]
     openmvs_version = runner.version(DENSIFY)
     o = options.openmvs
@@ -165,7 +255,7 @@ def run_dense(
         "units": units,
         "undistorted": cameras,
         "backend": backend,
-        "cuda_device": device,
+        "cuda_device": dense.cuda_device,
         "openmvs_version": openmvs_version,
         "densify": {
             "resolution_level": o.resolution_level,
@@ -182,6 +272,16 @@ def run_dense(
         "diag": diag,
         "dense": dense_stats,
         "mesh_raw": mesh_raw,
+        "refine": {
+            "enabled": options.refine.enabled,
+            "ran": ran,
+            "timed_out": refined is not None and refined.timed_out,
+            "cuda_device": refined.cuda_device if refined is not None else refine_device,
+            **mesh_refined,
+        },
+        "preview": {"enabled": options.preview.enabled, **(_preview_report(preview.ply) if preview else {})},
+        "oom_retries": [dataclasses.asdict(r) for r in retries],
+        "hardware": hardware,
         "tools": tools,
         "peak_vram_mb": max(vram) if vram else None,
         "disk_mb": {"undistorted": _disk_mb(undistorted_dir), "openmvs": _disk_mb(work_dir)},
@@ -190,27 +290,37 @@ def run_dense(
     }
     write_json(report, out / ARTIFACTS["report"])
     log.info(
-        "%d dense points (%.1f%% inside the sparse bbox) in %.1f s on %s; raw mesh %d faces, largest component %.1f%%",
+        "%d dense points (%.1f%% inside the sparse bbox) in %.1f s on %s; raw mesh %d faces, largest component %.1f%%;"
+        " refined mesh %d faces in %.1f s",
         len(xyz),
         100 * dense_stats["inside_sparse_bbox_frac"],
         timings["densify"],
         backend,
         mesh_raw["faces"],
         100 * mesh_raw["largest_component_frac"],
+        mesh_refined["faces"],
+        timings["refine"],
     )
+    backends = {"densify": _backend(dense, backend), "mesh": _backend(mesh, backend)}
+    if refined is not None:
+        backends["refine"] = _backend(refined, refine_backend)
+    if preview is not None:
+        backends["texture"] = _backend(preview, backend)
     return StageOutput(
-        artifacts=dict(ARTIFACTS),
+        artifacts=artifacts,
         metrics={
             "num_dense_points": len(xyz),
             "mesh_raw_faces": mesh_raw["faces"],
+            "mesh_refined_faces": mesh_refined["faces"],
             "inside_sparse_bbox_frac": dense_stats["inside_sparse_bbox_frac"],
             "largest_component_frac": mesh_raw["largest_component_frac"],
             "densify_s": round(timings["densify"], 1),
+            "refine_s": round(timings["refine"], 1),
             "peak_vram_mb": report["peak_vram_mb"],
             "backend": backend,
         },
         warnings=list(warnings),
-        backends={"densify": backend, "mesh": backend},
+        backends=backends,
         tools={"OpenMVS": openmvs_version, "pycolmap": pycolmap.__version__},
     )
 
@@ -227,8 +337,8 @@ class DenseStage(Stage):
         return {"device": self.ctx.config.device}
 
     def run(self) -> StageOutput:
-        gpu_index = self.ctx.config.device.gpu_index
-        runner = ToolRunner(self.ctx.run_dir / "logs" / STAGE, self.options.openmvs.bin_dir, gpu_index)
+        device = self.ctx.config.device
+        runner = ToolRunner(self.ctx.run_dir / "logs" / STAGE, self.options.openmvs.bin_dir, device.gpu_index)
         return run_dense(
             self.ctx.stage_dir(s04_align.STAGE),
             self.ctx.stage_dir(s03_sfm.STAGE),
@@ -236,7 +346,9 @@ class DenseStage(Stage):
             self.options,
             runner,
             self.ctx.backend("dense"),
-            gpu_index,
+            device.gpu_index,
+            cpu_fallback=device.preference == "auto",
+            hardware=self.ctx.hardware,
         )
 
     def expected_artifacts(self) -> list[Path]:
