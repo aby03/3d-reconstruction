@@ -1,7 +1,10 @@
-"""COLMAP helpers on top of pycolmap: symlinked image roots, image names, camera intrinsics, model files, Sim3."""
+"""COLMAP helpers on top of pycolmap: symlinked image roots, image names, camera intrinsics, model files, Sim3,
+COLMAP's log output."""
 
+import contextlib
 import os
 import shutil
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,15 @@ def parse_image_name(name: str) -> tuple[str, str, int]:
     return sequence_id, camera_id, int(Path(file).stem)
 
 
+def camera_keys(rec: pycolmap.Reconstruction) -> dict[int, str]:
+    """camera_id -> `<sequence_id>/<camera_id>`, from the image folder each camera was made for."""
+    keys = {}
+    for image in rec.images.values():
+        sequence_id, camera_id, _ = parse_image_name(image.name)
+        keys.setdefault(image.camera_id, f"{sequence_id}/{camera_id}")
+    return keys
+
+
 def camera_intrinsics(camera: pycolmap.Camera) -> dict[str, Any]:
     """Model, size, raw params and the named pinhole + distortion values of a camera."""
     model = camera.model.name
@@ -70,3 +82,23 @@ def write_model(rec: pycolmap.Reconstruction, path: Path, text: bool = False) ->
 def to_sim3d(sim3: Sim3) -> pycolmap.Sim3d:
     """`sim3` as a pycolmap `Sim3d`, e.g. for `Reconstruction.transform`."""
     return pycolmap.Sim3d(sim3.scale, pycolmap.Rotation3d(sim3.R), sim3.t)
+
+
+@contextlib.contextmanager
+def colmap_log(log_file: Path | None) -> Iterator[None]:
+    """Send COLMAP's glog output to `log_file` instead of the console (errors still reach stderr)."""
+    if log_file is None:
+        yield
+        return
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    glog = pycolmap.logging
+    saved = glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold
+    glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = False, False, 2
+    glog.set_log_destination(glog.Level.INFO, f"{log_file}.")  # glog appends a timestamp
+    for level in (glog.Level.WARNING, glog.Level.ERROR, glog.Level.FATAL):
+        glog.set_log_destination(level, "")
+    try:
+        yield
+    finally:
+        glog.set_log_destination(glog.Level.INFO, "")
+        glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = saved

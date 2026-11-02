@@ -51,3 +51,13 @@ def align_run(pipeline_run, sfm_run) -> Path:
     result = run_stages(pipeline_run, [AlignStage])
     assert result.status == "success", result.error
     return pipeline_run.stage_dir("align")
+
+
+@pytest.fixture(scope="session")
+def dense_run(pipeline_run, align_run) -> Path:
+    """dense on the model of `align_run` with the default config, once per session; returns its stage dir."""
+    from recon.pipeline.stages.s05_dense import DenseStage
+
+    result = run_stages(pipeline_run, [DenseStage])
+    assert result.status == "success", result.error
+    return pipeline_run.stage_dir("dense")

@@ -1,1 +1,1 @@
-from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm, s04_align  # noqa: F401  (registers the stages)
+from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm, s04_align, s05_dense  # noqa: F401  (registers the stages)

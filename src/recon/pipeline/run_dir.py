@@ -66,6 +66,7 @@ class StageManifest:
     upstream: dict[str, str] = field(default_factory=dict)  # upstream stage -> sha1 of its manifest file
     error: str | None = None  # traceback tail of a failed stage
     backends: dict[str, str] = field(default_factory=dict)  # operation -> backend that ran it
+    tools: dict[str, str | None] = field(default_factory=dict)  # external tool or library -> version
 
 
 def write_manifest(manifest: StageManifest, stage_path: Path) -> Path:

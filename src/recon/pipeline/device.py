@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Literal
 
@@ -51,7 +52,8 @@ CAPABILITIES = {
 
 
 def _run(*cmd: str) -> str:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=30).stdout
+    with tempfile.TemporaryDirectory() as tmp:  # OpenMVS tools drop a log file into the current directory
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=tmp).stdout
 
 
 def _probe_torch(info: DeviceInfo, gpu_index: int) -> None:

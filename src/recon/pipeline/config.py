@@ -13,6 +13,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from recon.align import AlignOptions
 from recon.capture.open_camera_sensors import LoaderOptions
+from recon.dense import DenseOptions
 from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
 from recon.pipeline.device import DeviceOptions
@@ -41,6 +42,7 @@ class PipelineConfig:
     keyframes: KeyframeOptions = field(default_factory=KeyframeOptions)
     sfm: SfmOptions = field(default_factory=SfmOptions)
     align: AlignOptions = field(default_factory=AlignOptions)
+    dense: DenseOptions = field(default_factory=DenseOptions)
 
 
 SECTIONS: dict[str, type] = {f.name: f.type for f in dataclasses.fields(PipelineConfig)}

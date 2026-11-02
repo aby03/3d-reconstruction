@@ -14,7 +14,7 @@ from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, t
 from recon.pipeline.run_dir import latest_run_dir, read_manifest, setup_logging
 from recon.pipeline.runner import PipelineError, open_run, run_stages, scene_path, select_stages
 from recon.pipeline.stage import get_stage, registered_stages
-from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm, s04_align
+from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm, s04_align, s05_dense
 from recon.sensors.sync import synchronize
 
 
@@ -231,6 +231,17 @@ def build_parser() -> argparse.ArgumentParser:
     align.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
     _add_resume_arg(align, "default: the latest run, or a new run when there is none")
     align.set_defaults(func=cmd_stage, stage=s04_align.STAGE)
+
+    dense = commands.add_parser(
+        "dense",
+        help="undistort, OpenMVS densify and mesh of the aligned model; 05_dense/ (run --only dense --resume)",
+    )
+    dense.add_argument("--input", required=True, type=Path, help="capture directory (root or stamp dir)")
+    _add_config_args(dense)
+    _add_output_args(dense)
+    dense.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
+    _add_resume_arg(dense, "default: the latest run, or a new run when there is none")
+    dense.set_defaults(func=cmd_stage, stage=s05_dense.STAGE)
 
     inspect = commands.add_parser("inspect", help="load and check a capture, print a summary; writes nothing")
     _add_capture_args(inspect)

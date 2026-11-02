@@ -55,11 +55,11 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm, align)
+pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm, align, dense)
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
 ```bash
 pixi run recon run --input data/room2_tiny --resume                    # the latest run
 pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
@@ -78,9 +78,9 @@ pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`). Unknown keys and wrong types are errors that name the full key path.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`, `dense`). Unknown keys and wrong types are errors that name the full key path.
 
-**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) follows `device.preference`. Each stage manifest records the backends it used under `backends`.
+**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) and the OpenMVS tools of the dense step follow `device.preference`. Each stage manifest records the backends it used under `backends`.
 
 ### Check the machine
 ```bash
@@ -161,6 +161,23 @@ head $D/trajectory_tum/*.txt
 ls $D/reports/plots/        # gravity_residuals, height_hist (floor line, cameras), trajectory_topdown (W x/y), yaw_hist
 ```
 In the report, `gravity.residual_median_deg` is how far the keyframes' IMU gravity is from −Z after alignment (about 1°: the image-vs-IMU noise), `floor.tilt_to_gravity_deg` the angle between the floor normal and the IMU gravity before it was corrected, and `gravity.down_vs_model_y_deg` how far the SfM model's +y was from gravity. `manhattan` has the wall direction, its confidence and whether the yaw was applied; `cam_imu.<sequence_id>` has `angle_to_nominal_deg` (hand-eye `R_cam_imu` vs the nominal one), `well_conditioned`, `time_offset_ms` with `cost_at_zero`/`cost_best` and `corr_peak_ms` (an angular-speed cross-check), and `suggested_config` the values worth trying. Skip the yaw with `--set align.manhattan.enabled=false`. Open `sparse_aligned_txt/` or the PLY in a viewer (e.g. MeshLab): the floor is flat at z = 0 with Z up.
+
+### Step 5: dense
+Needs a finished alignment (`recon align` first, or use `recon run`) and the OpenMVS build (setup step 4; `pixi run recon doctor` shows whether it has CUDA).
+```bash
+pixi run recon dense --input data/room2_tiny
+pixi run recon dense --input data/room2_tiny --force --set device.preference=cpu   # the CPU path
+```
+Same as `recon run --only dense --resume`: like `recon align` it continues in the latest run (`--resume RUN_ID` picks another, `--force` re-runs it). It densifies the aligned model (`04_alignment/sparse_aligned`), so every output is in the world frame W (Z up, floor at z = 0, units of the SfM model). First the model and its keyframes are undistorted with pycolmap into PINHOLE cameras (`undistorted/`, COLMAP layout, image names unchanged, black border cropped: 1080×1920 → 1043×1857). Then the OpenMVS tools run in `05_dense/openmvs/`: `InterfaceCOLMAP` (→ `scene.mvs`), `DensifyPointCloud` (patch-match depth maps, fused into `scene_dense.mvs` + `scene_dense.ply`) and `ReconstructMesh` (→ `scene_dense_mesh.ply`). With `device.preference: auto` they run on the GPU when the OpenMVS build has CUDA (`--cuda-device <device.gpu_index>`); the CPU path passes `--cuda-device -2` to every tool (on tiny: densify 70 s on CUDA, 126 s on the CPU). The `.mvs` files store the image paths relative to `openmvs/` (`../undistorted/images/...`), so don't move `openmvs/` or `undistorted/`. OpenMVS's region-of-interest crop is off (`dense.openmvs.crop_to_roi: false`): its estimated ROI cuts the upper walls. Images are processed at half size (`resolution_level: 1`), but OpenMVS never goes below `min_resolution` on the long side, so on 1857 px keyframes level 2 is the same as level 1 unless `min_resolution` is lowered too; the report gives the effective long side. Depth maps are removed after fusion (`keep_dmaps: false`). Each tool's output goes to `outputs/<scene>/runs/<run_id>/logs/dense/<Tool>.log` (and OpenMVS's own `<Tool>-<stamp>.log` files are moved there too; pycolmap's to `colmap.log.*`); a failing tool stops the stage with the end of its log in the error. Keys: `dense.undistort.max_image_size`, `dense.openmvs.{resolution_level, min_resolution, max_resolution, number_views, number_views_fuse, sub_resolution_levels, iters, geometric_iters, filter_point_cloud, crop_to_roi, keep_dmaps, bin_dir}` (`bin_dir: null` takes OpenMVS from `PATH`), `dense.mesh.{remove_spurious, remove_spikes, close_holes, smooth, decimate}`.
+
+Results to look at:
+```bash
+D=$(ls -d outputs/room2_tiny/runs/*/05_dense | tail -1)
+cat $D/stage_manifest.json $D/reports/dense_report.json
+ls $D/reports/plots/        # dense_height_hist (floor spike at z = 0, walls up to the ceiling), dense_topdown (W x/y)
+ls $D/../logs/dense/
+```
+Writes `dense_points.ply` (the fused cloud as a plain binary PLY: `x y z nx ny nz red green blue`), `mesh_raw.ply` (the ReconstructMesh surface), `undistorted/` (images, `sparse/` PINHOLE model, `stereo/`; the texturing input of later steps), `openmvs/` (`scene.mvs`, `scene_dense.mvs` with the `scene_dense.ply` it references, `scene_dense_mesh.ply`) and the report. In the report, `num_dense_points`, `dense.inside_sparse_bbox_frac` and `mesh_raw.inside_sparse_bbox_frac` (share of the vertices inside the box of the aligned sparse points and cameras; ≥ 0.99 expected, a warning below), `mesh_raw.largest_component_frac` (share of the faces in the largest connected piece; > 0.9 expected), `dense.floor_band_frac` / `floor_band_median_z` (points within 1% of the scene diagonal of z = 0), `densify.effective_long_side`, and per tool its time, peak GPU memory (`peak_vram_mb`, sampled with `nvidia-smi`, GPU-wide) and log. Open `dense_points.ply` and `mesh_raw.ply` in MeshLab (Z up; `openmvs/scene_dense.ply` also loads there, but trimesh can't read its per-point view lists).
 
 ### Tests
 ```bash

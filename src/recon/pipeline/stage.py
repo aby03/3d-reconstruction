@@ -15,6 +15,7 @@ class StageOutput:
     metrics: dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     backends: dict[str, str] = field(default_factory=dict)  # operation -> backend that ran it, e.g. decode: nvdec
+    tools: dict[str, str | None] = field(default_factory=dict)  # external tool or library -> version
 
 
 class Stage(ABC):

@@ -1,16 +1,14 @@
 """Step 3: features, matching and mapping of every sequence's keyframes into one COLMAP model in `03_sfm/`."""
 
-import contextlib
 import logging
 import time
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pycolmap
 
-from recon.io.colmap import camera_intrinsics, link_image_root, parse_image_name, write_model
+from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log, link_image_root, write_model
 from recon.io.tables import write_csv, write_json
 from recon.pipeline.device import Backend
 from recon.pipeline.stage import Stage, StageOutput, register_stage
@@ -59,35 +57,6 @@ ARTIFACTS = {
 }
 
 
-@contextlib.contextmanager
-def _colmap_log(log_file: Path | None) -> Iterator[None]:
-    """Send COLMAP's glog output to `log_file` instead of the console (errors still reach stderr)."""
-    if log_file is None:
-        yield
-        return
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    glog = pycolmap.logging
-    saved = glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold
-    glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = False, False, 2
-    glog.set_log_destination(glog.Level.INFO, f"{log_file}.")  # glog appends a timestamp
-    for level in (glog.Level.WARNING, glog.Level.ERROR, glog.Level.FATAL):
-        glog.set_log_destination(level, "")
-    try:
-        yield
-    finally:
-        glog.set_log_destination(glog.Level.INFO, "")
-        glog.logtostderr, glog.alsologtostderr, glog.stderrthreshold = saved
-
-
-def _camera_keys(rec: pycolmap.Reconstruction) -> dict[int, str]:
-    """camera_id -> `<sequence_id>/<camera_id>`, from the image folder each camera was made for."""
-    keys = {}
-    for image in rec.images.values():
-        sequence_id, camera_id, _ = parse_image_name(image.name)
-        keys.setdefault(image.camera_id, f"{sequence_id}/{camera_id}")
-    return keys
-
-
 def _write_plots(out: Path, rec: pycolmap.Reconstruction) -> None:
     tracks = track_lengths(rec)
     plots.plot_histogram(
@@ -128,7 +97,7 @@ def run_sfm(
     gravity = gravity_vectors(inputs.gravity, priors.gravity_min_conf)
     log.warning("no intrinsics prior: the focal length starts from COLMAP's guess and is refined (calibrate instead)")
 
-    with _colmap_log(log_file):
+    with colmap_log(log_file):
         t0 = time.perf_counter()
         camera_model = options.initial_camera_model
         extract_features(database, image_root, names, options.features, camera_model, use_gpu, gpu_index)
@@ -217,7 +186,7 @@ def run_sfm(
     write_model(rec, out / ARTIFACTS["model"])
     write_model(rec, out / ARTIFACTS["model_txt"], text=True)
     rec.export_PLY(out / ARTIFACTS["points"])
-    keys = _camera_keys(rec)
+    keys = camera_keys(rec)
     intrinsics = {keys[cid]: camera_intrinsics(cam) for cid, cam in sorted(rec.cameras.items()) if cid in keys}
     write_json(intrinsics, out / ARTIFACTS["intrinsics"])
     _write_plots(out, rec)

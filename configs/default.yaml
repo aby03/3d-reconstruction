@@ -121,3 +121,26 @@ align:                           # world frame W: Z up, gravity -Z, floor z = 0,
     pair_span: 5                 # keyframe pairs up to this many apart
     min_rotation_deg: 2.0        # hand-eye uses pairs that rotate at least this much
     max_offset_ms: 100.0         # time offsets searched in +-this, 1 ms steps
+
+dense:                           # step 5: undistort the aligned model, OpenMVS densify + mesh (CUDA per device.preference)
+  undistort:
+    max_image_size: -1           # -1: full resolution (1080x1920 keyframes -> 1043x1857 PINHOLE)
+  openmvs:
+    resolution_level: 1          # images scaled down by 2^level before patch match ...
+    min_resolution: 640          #   ... but the long side never below this (level 2 = level 1 on 1857 px images)
+    max_resolution: 2560
+    number_views: 6              # neighbour views per depth map (tiny: 6 -> 70 s, 8 + iters 4 -> 101 s)
+    number_views_fuse: 3         # a fused point needs this many agreeing depth maps
+    sub_resolution_levels: 2
+    iters: 3                     # patch-match iterations
+    geometric_iters: 2           # geometric-consistency iterations (1: -19% time, -5% points on tiny)
+    filter_point_cloud: 0        # visibility filter of the fused cloud (0: off)
+    crop_to_roi: false           # OpenMVS's estimated ROI (densify and mesh) cuts the upper walls (30% of the points on tiny)
+    keep_dmaps: false            # depth maps (~11.6 MB per image at level 1) are removed after fusion
+    bin_dir: null                # null: OpenMVS from PATH (pixi adds .local/openmvs/bin/OpenMVS)
+  mesh:                          # ReconstructMesh
+    remove_spurious: 20          # remove faces with too long edges / isolated components (0: off)
+    remove_spikes: true
+    close_holes: 30              # close holes up to this many edges (0: off)
+    smooth: 2                    # smoothing iterations
+    decimate: 1.0                # 1: no decimation

@@ -167,6 +167,7 @@ def _run_stage(stage: Stage, config_hash: str, upstream: dict[str, str]) -> Stag
         metrics=output.metrics,
         warnings=output.warnings,
         backends=output.backends,
+        tools=output.tools,
     )
 
 
