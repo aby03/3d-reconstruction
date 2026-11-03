@@ -26,6 +26,7 @@ METADATA_KEYS = {
     "files",
     "bbox_world",
     "num_cameras",
+    "num_planes",
 }
 
 
@@ -111,6 +112,7 @@ def test_metadata(export_run, mesh_report, align_run):
     assert metadata["pipeline_version"] is None or len(metadata["pipeline_version"]) >= 7
     aligned = pycolmap.Reconstruction(align_run / ALIGN_ARTIFACTS["model"])
     assert metadata["num_cameras"] == aligned.num_reg_images()
+    assert metadata["num_planes"] == mesh_report["planes"]["by_label"]
     assert set(metadata["files"]) == {"model.glb", "obj/model.obj"}
     assert metadata["files"]["model.glb"]["up"] == "+Y" and metadata["files"]["obj/model.obj"]["up"] == "+Z"
     for rel, entry in metadata["files"].items():

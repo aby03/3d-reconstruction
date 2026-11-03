@@ -1,4 +1,5 @@
-"""Step 6: clean the dense mesh, close its small holes and decimate it, texture it at full resolution with OpenMVS, in world W, in
+"""Step 6: clean the dense mesh, close its small holes, flatten its walls, floor and ceiling and decimate it,
+texture it at full resolution with OpenMVS, in world W, in
 `06_mesh_post/`, and check the final geometry against the dense points."""
 
 import dataclasses
@@ -18,6 +19,7 @@ from recon.mesh import MeshPostOptions
 from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
 from recon.mesh.holes import fill_holes
+from recon.mesh.planes import regularize, write_planes
 from recon.mesh.qa import dense_to_mesh, tau, unsupported_area_frac
 from recon.mesh.texturing import atlas_stats, texture_mesh
 from recon.pipeline.device import Backend
@@ -30,12 +32,15 @@ log = logging.getLogger(__name__)
 STAGE = "mesh_post"
 DIR_NAME = "06_mesh_post"
 MAX_UNTEXTURED_FRAC = 0.01
+MAX_WALL_RMS_FRAC = 0.002  # flatness of every wall with >= 1% of the area after snapping, x diag
 MAX_QA_P95_TAU = 2.0  # dense -> mesh p95 distance above this many tau is a warning
 UNSUPPORTED_DIST_TAU = 2.0  # mesh area farther than this many tau from every dense point is unsupported
 
 ARTIFACTS = {
     "mesh_clean": "mesh_clean.ply",
     "mesh_holes_filled": "mesh_holes_filled.ply",
+    "mesh_regularized": "mesh_regularized.ply",
+    "planes": "planes.json",
     "mesh_final_geometry": "mesh_final_geometry.ply",
     "textured": "textured",
     "textured_obj": "textured/mesh.obj",
@@ -50,9 +55,8 @@ def _final_report(path: Path, box: tuple[np.ndarray, np.ndarray]) -> dict[str, A
     return {**mesh_stats(mesh), "inside_sparse_bbox_frac": inside_frac(np.asarray(mesh.vertices), box)}
 
 
-def _qa(dense_dir: Path, final: Path, units: str, diag: float) -> dict[str, Any]:
+def _qa(dense_dir: Path, final: Path, t: float, diag: float) -> dict[str, Any]:
     points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
-    t = tau(units, diag)
     distances = dense_to_mesh(points, final)
     return {
         "tau": t,
@@ -93,8 +97,19 @@ def run_mesh_post(
     timings["holes"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    t = tau(dense["units"], dense["diag"], options.planes.snap_dist)
+    planes_report, planes = regularize(
+        out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_regularized"], t, options.planes
+    )
+    write_planes(out / ARTIFACTS["planes"], planes)
+    if planes_report["enabled"]:
+        rms = planes_report["wall_rms_max"]
+        planes_report["wall_rms_max_frac"] = rms / dense["diag"] if rms is not None else None
+    timings["planes"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     decimated = decimate(
-        out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_final_geometry"], options.decimate
+        out / ARTIFACTS["mesh_regularized"], out / ARTIFACTS["mesh_final_geometry"], options.decimate
     )
     timings["decimate"] = time.perf_counter() - t0
 
@@ -117,7 +132,7 @@ def run_mesh_post(
     timings["stats"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    qa = _qa(dense_dir, out / ARTIFACTS["mesh_final_geometry"], dense["units"], dense["diag"])
+    qa = _qa(dense_dir, out / ARTIFACTS["mesh_final_geometry"], t, dense["diag"])
     timings["qa"] = time.perf_counter() - t0
 
     if atlas["untextured_face_frac"] is not None and atlas["untextured_face_frac"] > MAX_UNTEXTURED_FRAC:
@@ -134,6 +149,16 @@ def run_mesh_post(
             f"final mesh: {final['inside_sparse_bbox_frac']:.1%} of the vertices inside the sparse bbox"
             f" (< {s05_dense.MIN_INSIDE_FRAC:.0%})"
         )
+    if planes_report["enabled"]:
+        if not planes_report["by_label"]["floor"]:
+            warnings.append("planes: no floor found")
+        if (planes_report["wall_rms_max_frac"] or 0.0) >= MAX_WALL_RMS_FRAC:
+            warnings.append(
+                f"planes: a wall has RMS {planes_report['wall_rms_max_frac']:.3%} of diag after snapping"
+                f" (>= {MAX_WALL_RMS_FRAC:.1%})"
+            )
+        if planes_report["flipped_faces"]:
+            warnings.append(f"planes: {planes_report['flipped_faces']} faces flipped by snapping")
     if qa["dense_to_mesh"]["p95"] > MAX_QA_P95_TAU * qa["tau"]:
         warnings.append(
             f"dense -> mesh p95 distance {qa['dense_to_mesh']['p95']:.4g} > {MAX_QA_P95_TAU:g} tau"
@@ -155,6 +180,7 @@ def run_mesh_post(
         "diag": dense["diag"],
         "cleanup": dataclasses.asdict(cleaned),
         "holes": holes,
+        "planes": planes_report,
         "decimate": {**decimated, "budget": options.decimate.texture_face_budget},
         "final": final,
         "texture": {
@@ -170,12 +196,13 @@ def run_mesh_post(
     }
     write_json(report, out / ARTIFACTS["report"])
     log.info(
-        "mesh %d -> %d faces (cleanup %.1f s, %d hole(s) closed, decimate %.1f s); textured in %.1f s on %s:"
-        " %d atlas(es) %s, %.2f%% faces untextured; dense -> mesh p95 %.2f%% of diag",
+        "mesh %d -> %d faces (cleanup %.1f s, %d hole(s) closed, %d planes, decimate %.1f s); textured in %.1f s"
+        " on %s: %d atlas(es) %s, %.2f%% faces untextured; dense -> mesh p95 %.2f%% of diag",
         cleaned.before["faces"],
         final["faces"],
         timings["cleanup"],
         holes["filled"],
+        len(planes),
         timings["decimate"],
         timings["texture"],
         texture_backend,
@@ -192,6 +219,9 @@ def run_mesh_post(
             "atlas_count": atlas["atlas_count"],
             "texture_s": round(timings["texture"], 1),
             "qa_p95_frac": round(qa["p95_frac"], 6),
+            "num_planes": len(planes),
+            "planar_coverage": round(planes_report.get("coverage", 0.0), 4),
+            "wall_rms_max_frac": planes_report.get("wall_rms_max_frac"),
             "backend": backend,
         },
         warnings=list(warnings),

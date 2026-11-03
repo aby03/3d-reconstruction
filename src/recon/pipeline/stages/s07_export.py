@@ -17,6 +17,7 @@ from recon.export.manifest import file_entry, write_metadata
 from recon.export.obj import OBJ_NAME, validate_obj, write_obj
 from recon.io.ply import read_mesh
 from recon.io.tables import read_json
+from recon.mesh.planes import LABELS as PLANE_LABELS
 from recon.pipeline.stage import Stage, StageOutput, register_stage
 from recon.pipeline.stages import s04_align, s06_mesh_post
 
@@ -69,6 +70,8 @@ def run_export(
     bounds_w = np.asarray(final.bounds)
     units = read_json(align_dir / s04_align.ARTIFACTS["transform"])["units"]
     num_cameras = pycolmap.Reconstruction(align_dir / s04_align.ARTIFACTS["model"]).num_reg_images()
+    labels = [p["label"] for p in read_json(mesh_post_dir / s06_mesh_post.ARTIFACTS["planes"])]
+    num_planes = {label: labels.count(label) for label in PLANE_LABELS}
     timings["load"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -98,6 +101,7 @@ def run_export(
         },
         bbox_world=bounds_w.tolist(),
         num_cameras=num_cameras,
+        num_planes=num_planes,
     )
     timings["metadata"] = time.perf_counter() - t0
     log.info(

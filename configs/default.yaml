@@ -157,7 +157,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     resolution_level: 2
     min_resolution: 320
 
-mesh_post:                       # step 6: clean, fill small holes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
+mesh_post:                       # step 6: clean, fill small holes, flatten planes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
   input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)
   cleanup:
     min_component_frac: 0.005    # drop components with fewer faces than this fraction (room2: 17 -> 1 components)
@@ -165,6 +165,16 @@ mesh_post:                       # step 6: clean, fill small holes, decimate the
   holes:                         # close small boundary loops (tiny and room2 have only the outer one)
     small_hole_max_edges: 100
     max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary
+  planes:                        # snap walls/floor/ceiling flat, straighten their edges (room2: 19 planes, 35% of the area)
+    enabled: true
+    snap_dist: null              # tau; null = 0.005 * diag (arbitrary units) or 0.02 (metres)
+    normal_tol_deg: 20
+    merge_angle_deg: 3
+    manhattan_snap_deg: 5        # wall directions this close to an axis are snapped onto it
+    min_plane_area_frac: 0.005
+    straighten_edges: true
+    max_snap_move_factor: 1.5
+    smooth_nonplanar: true       # Taubin, 5 steps, vertices off the planes only
   decimate:
     texture_face_budget: 600000  # quadric decimation above this many faces (room2 refined: 728k -> 600k, 3.5 s)
     planar_quadric: true
