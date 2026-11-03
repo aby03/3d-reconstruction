@@ -8,6 +8,7 @@ import trimesh
 
 from recon.io.tables import read_json
 from recon.mesh.decimate import DecimateOptions, decimate
+from recon.mesh.holes import boundary_loops, fill_holes
 from recon.mesh.texturing import read_mtl_maps, read_obj_uv
 from recon.pipeline.cli import main
 from recon.pipeline.config import PipelineConfig, load_config
@@ -22,9 +23,11 @@ REPORT_KEYS = {
     "units",
     "diag",
     "cleanup",
+    "holes",
     "decimate",
     "final",
     "texture",
+    "qa",
     "oom_retries",
     "tools",
     "timings",
@@ -55,7 +58,7 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    assert set(report["timings"]) == {"load", "cleanup", "decimate", "texture", "stats"}
+    assert set(report["timings"]) == {"load", "cleanup", "holes", "decimate", "texture", "stats", "qa"}
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
 
 
@@ -70,13 +73,49 @@ def test_cleanup(report, mesh_post_run):
     assert len(mesh.faces) == after["faces"] and len(mesh.vertices) == after["vertices"]
 
 
+def test_holes(report, mesh_post_run):
+    # tiny has one boundary loop, the outer one (~400 edges, perimeter 3.8x the diagonal): nothing to close
+    assert report["holes"] == {
+        "loops": 1,
+        "filled": 0,
+        "filled_faces": 0,
+        "skipped_outer": 1,
+        "skipped_large": 0,
+        "largest_loop_edges": report["cleanup"]["after"]["boundary_edges"],
+    }
+    clean, filled = mesh_post_run / ARTIFACTS["mesh_clean"], mesh_post_run / ARTIFACTS["mesh_holes_filled"]
+    assert filled.read_bytes() == clean.read_bytes()
+
+
+def test_holes_punched(report, mesh_post_run, tmp_path):
+    """A hole punched into tiny's cleaned mesh (the faces around one vertex and its neighbours) is closed."""
+    mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
+    centre = int(np.argmin(np.linalg.norm(mesh.vertices - np.median(mesh.vertices, axis=0), axis=1)))
+    ring = [centre, *mesh.vertex_neighbors[centre]]
+    removed = np.isin(mesh.faces, ring).any(axis=1)
+    punched = trimesh.Trimesh(mesh.vertices, mesh.faces[~removed], process=False)
+    punched.remove_unreferenced_vertices()
+    punched.export(tmp_path / "punched.ply")
+    outer = report["cleanup"]["after"]["boundary_edges"]
+    loops = sorted(len(loop) for loop in boundary_loops(punched))
+    assert loops[-1] == outer and len(loops) == 2
+
+    result = fill_holes(tmp_path / "punched.ply", tmp_path / "filled.ply")
+    assert result["loops"] == 2 and result["skipped_outer"] == 1 and result["filled"] == 1
+    assert result["filled_faces"] == loops[0] - 2  # the loop's own vertices, triangulated
+    filled = trimesh.load(tmp_path / "filled.ply", process=False, force="mesh")
+    assert len(filled.faces) == len(punched.faces) + result["filled_faces"]
+    assert [len(loop) for loop in boundary_loops(filled)] == [outer]
+
+
 def test_decimate(report, mesh_post_run, tmp_path):
-    # tiny (101k faces) is within the 600k budget: the final geometry is the cleaned mesh
-    faces = report["cleanup"]["after"]["faces"]
+    # tiny (101k faces) is within the 600k budget: the final geometry is the holes-filled mesh
+    faces = report["holes"]["filled_faces"] + report["cleanup"]["after"]["faces"]
     assert report["decimate"] == {"decimated": False, "faces_in": faces, "faces_out": faces, "budget": 600_000}
-    clean, final = mesh_post_run / ARTIFACTS["mesh_clean"], mesh_post_run / ARTIFACTS["mesh_final_geometry"]
-    assert final.read_bytes() == clean.read_bytes()
-    assert report["final"]["faces"] == report["cleanup"]["after"]["faces"]
+    clean = mesh_post_run / ARTIFACTS["mesh_clean"]
+    filled, final = mesh_post_run / ARTIFACTS["mesh_holes_filled"], mesh_post_run / ARTIFACTS["mesh_final_geometry"]
+    assert final.read_bytes() == filled.read_bytes()
+    assert report["final"]["faces"] == faces
 
     result = decimate(clean, tmp_path / "small.ply", DecimateOptions(texture_face_budget=50_000))
     assert result["decimated"] and abs(result["faces_out"] - 50_000) <= 500
@@ -113,6 +152,17 @@ def test_world_frame(report, dense_run, mesh_post_run):
     mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_final_geometry"], process=False, force="mesh")
     inside = ((mesh.vertices >= box["min"]) & (mesh.vertices <= box["max"])).all(axis=1).mean()
     assert np.isclose(inside, final["inside_sparse_bbox_frac"])
+
+
+def test_qa(report, mesh_post_run):
+    qa = report["qa"]
+    assert np.isclose(qa["tau"], 0.005 * report["diag"])  # arbitrary units
+    distances = qa["dense_to_mesh"]
+    assert distances["samples"] > 0 and distances["p50"] <= distances["p95"] <= distances["max"]
+    assert np.isclose(qa["p95_frac"], distances["p95"] / report["diag"])
+    assert qa["p95_frac"] < 0.01  # 2 tau; measured 0.0022
+    assert 0 < qa["unsupported_area_frac"] < 0.5  # 0.23: graph-cut surface bridging uncaptured space
+    assert read_manifest(mesh_post_run).metrics["qa_p95_frac"] == round(qa["p95_frac"], 6)
 
 
 def test_tool_logs(mesh_post_run):

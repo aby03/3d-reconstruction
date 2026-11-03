@@ -157,11 +157,14 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     resolution_level: 2
     min_resolution: 320
 
-mesh_post:                       # step 6: clean + decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
+mesh_post:                       # step 6: clean, fill small holes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
   input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)
   cleanup:
     min_component_frac: 0.005    # drop components with fewer faces than this fraction (room2: 17 -> 1 components)
     min_component_diam_frac: 0.02  # ... or smaller than this fraction of the bbox diagonal
+  holes:                         # close small boundary loops (tiny and room2 have only the outer one)
+    small_hole_max_edges: 100
+    max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary
   decimate:
     texture_face_budget: 600000  # quadric decimation above this many faces (room2 refined: 728k -> 600k, 3.5 s)
     planar_quadric: true

@@ -1,5 +1,5 @@
-"""Step 6: clean and decimate the dense mesh, then texture it at full resolution with OpenMVS, in world W, in
-`06_mesh_post/`."""
+"""Step 6: clean the dense mesh, close its small holes and decimate it, texture it at full resolution with OpenMVS, in world W, in
+`06_mesh_post/`, and check the final geometry against the dense points."""
 
 import dataclasses
 import importlib.metadata
@@ -11,12 +11,14 @@ from typing import Any
 import numpy as np
 
 from recon.dense.openmvs import TEXTURE_MESH, cuda_device
-from recon.io.ply import mesh_stats, read_mesh
+from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points
 from recon.io.tables import read_json, write_json
 from recon.io.tools import ToolRunner
 from recon.mesh import MeshPostOptions
 from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
+from recon.mesh.holes import fill_holes
+from recon.mesh.qa import dense_to_mesh, tau, unsupported_area_frac
 from recon.mesh.texturing import atlas_stats, texture_mesh
 from recon.pipeline.device import Backend
 from recon.pipeline.stage import Stage, StageOutput, register_stage
@@ -28,9 +30,12 @@ log = logging.getLogger(__name__)
 STAGE = "mesh_post"
 DIR_NAME = "06_mesh_post"
 MAX_UNTEXTURED_FRAC = 0.01
+MAX_QA_P95_TAU = 2.0  # dense -> mesh p95 distance above this many tau is a warning
+UNSUPPORTED_DIST_TAU = 2.0  # mesh area farther than this many tau from every dense point is unsupported
 
 ARTIFACTS = {
     "mesh_clean": "mesh_clean.ply",
+    "mesh_holes_filled": "mesh_holes_filled.ply",
     "mesh_final_geometry": "mesh_final_geometry.ply",
     "textured": "textured",
     "textured_obj": "textured/mesh.obj",
@@ -43,6 +48,18 @@ INPUTS = {"refined": "mesh_refined", "raw": "mesh_raw"}
 def _final_report(path: Path, box: tuple[np.ndarray, np.ndarray]) -> dict[str, Any]:
     mesh = read_mesh(path)
     return {**mesh_stats(mesh), "inside_sparse_bbox_frac": inside_frac(np.asarray(mesh.vertices), box)}
+
+
+def _qa(dense_dir: Path, final: Path, units: str, diag: float) -> dict[str, Any]:
+    points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
+    t = tau(units, diag)
+    distances = dense_to_mesh(points, final)
+    return {
+        "tau": t,
+        "dense_to_mesh": distances,
+        "p95_frac": distances["p95"] / diag,
+        "unsupported_area_frac": unsupported_area_frac(final, points, UNSUPPORTED_DIST_TAU * t),
+    }
 
 
 def run_mesh_post(
@@ -72,7 +89,13 @@ def run_mesh_post(
     timings["cleanup"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    decimated = decimate(out / ARTIFACTS["mesh_clean"], out / ARTIFACTS["mesh_final_geometry"], options.decimate)
+    holes = fill_holes(out / ARTIFACTS["mesh_clean"], out / ARTIFACTS["mesh_holes_filled"], options.holes)
+    timings["holes"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    decimated = decimate(
+        out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_final_geometry"], options.decimate
+    )
     timings["decimate"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -93,6 +116,10 @@ def run_mesh_post(
     final = _final_report(out / ARTIFACTS["mesh_final_geometry"], box)
     timings["stats"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
+    qa = _qa(dense_dir, out / ARTIFACTS["mesh_final_geometry"], dense["units"], dense["diag"])
+    timings["qa"] = time.perf_counter() - t0
+
     if atlas["untextured_face_frac"] is not None and atlas["untextured_face_frac"] > MAX_UNTEXTURED_FRAC:
         warnings.append(
             f"{atlas['untextured_face_frac']:.1%} of the faces untextured (> {MAX_UNTEXTURED_FRAC:.0%})"
@@ -106,6 +133,11 @@ def run_mesh_post(
         warnings.append(
             f"final mesh: {final['inside_sparse_bbox_frac']:.1%} of the vertices inside the sparse bbox"
             f" (< {s05_dense.MIN_INSIDE_FRAC:.0%})"
+        )
+    if qa["dense_to_mesh"]["p95"] > MAX_QA_P95_TAU * qa["tau"]:
+        warnings.append(
+            f"dense -> mesh p95 distance {qa['dense_to_mesh']['p95']:.4g} > {MAX_QA_P95_TAU:g} tau"
+            f" ({MAX_QA_P95_TAU * qa['tau']:.4g})"
         )
     if atlas["faces"] != final["faces"]:
         warnings.append(f"{TEXTURE_MESH} wrote {atlas['faces']} faces for {final['faces']} input faces")
@@ -122,6 +154,7 @@ def run_mesh_post(
         "units": dense["units"],
         "diag": dense["diag"],
         "cleanup": dataclasses.asdict(cleaned),
+        "holes": holes,
         "decimate": {**decimated, "budget": options.decimate.texture_face_budget},
         "final": final,
         "texture": {
@@ -129,6 +162,7 @@ def run_mesh_post(
             "cuda_device": textured.cuda_device,
             **atlas,
         },
+        "qa": qa,
         "oom_retries": [dataclasses.asdict(r) for r in textured.oom_retries],
         "tools": tool_rows(runner, out),
         "timings": {k: round(v, 3) for k, v in timings.items()},
@@ -136,17 +170,19 @@ def run_mesh_post(
     }
     write_json(report, out / ARTIFACTS["report"])
     log.info(
-        "mesh %d -> %d faces (cleanup %.1f s, decimate %.1f s); textured in %.1f s on %s: %d atlas(es) %s,"
-        " %.2f%% faces untextured",
+        "mesh %d -> %d faces (cleanup %.1f s, %d hole(s) closed, decimate %.1f s); textured in %.1f s on %s:"
+        " %d atlas(es) %s, %.2f%% faces untextured; dense -> mesh p95 %.2f%% of diag",
         cleaned.before["faces"],
         final["faces"],
         timings["cleanup"],
+        holes["filled"],
         timings["decimate"],
         timings["texture"],
         texture_backend,
         atlas["atlas_count"],
         atlas["atlas_size"],
         100 * (atlas["untextured_face_frac"] or 0.0),
+        100 * qa["p95_frac"],
     )
     return StageOutput(
         artifacts=dict(ARTIFACTS),
@@ -155,6 +191,7 @@ def run_mesh_post(
             "untextured_face_frac": atlas["untextured_face_frac"],
             "atlas_count": atlas["atlas_count"],
             "texture_s": round(timings["texture"], 1),
+            "qa_p95_frac": round(qa["p95_frac"], 6),
             "backend": backend,
         },
         warnings=list(warnings),
