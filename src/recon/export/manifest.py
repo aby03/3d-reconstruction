@@ -15,16 +15,13 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def file_entry(path: Path, up: str, info: dict[str, Any]) -> dict[str, Any]:
-    """The `files` entry of an exported file: up axis, counts from its validation `info`, size and sha256."""
-    return {
-        "up": up,
-        "faces": info["faces"],
-        "vertices": info["vertices"],
-        "textures": info["textures"],
-        "bytes": path.stat().st_size,
-        "sha256": sha256(path),
-    }
+def file_entry(path: Path, up: str | None = None, info: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The `files` entry of an exported file: up axis (files in a frame), counts from a mesh's validation `info`,
+    size and sha256."""
+    entry: dict[str, Any] = {} if up is None else {"up": up}
+    if info is not None:
+        entry |= {"faces": info["faces"], "vertices": info["vertices"], "textures": info["textures"]}
+    return entry | {"bytes": path.stat().st_size, "sha256": sha256(path)}
 
 
 def write_metadata(path: Path, **fields: Any) -> Path:

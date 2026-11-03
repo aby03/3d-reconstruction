@@ -66,7 +66,8 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    assert set(report["timings"]) == {"load", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
+    steps = {"load", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
+    assert set(report["timings"]) == steps
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
 
 

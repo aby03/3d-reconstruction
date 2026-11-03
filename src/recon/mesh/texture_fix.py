@@ -13,7 +13,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from recon.io.ply import read_openmvs_points
-from recon.mesh.texturing import TEXTURED_OBJ, _is_sentinel, opaque_mtl, read_mtl_maps, read_obj_uv
+from recon.mesh.texturing import TEXTURED_OBJ, _is_sentinel, opaque_mtl, read_mtl_maps, read_obj_faces, read_obj_uv
 
 SUBPIXEL_BITS = 4  # cv2.fillPoly fixed-point precision
 CELL_PX = 16  # colour cells of untextured faces: one JPEG chroma block (4:2:0), so the colour survives encoding
@@ -143,21 +143,6 @@ def fix_atlas(
     return image, cells, stats
 
 
-def _obj_positions(obj: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Vertex positions and, per material, the faces' vertex indices (F, 3) of a triangle OBJ, grouped like
-    `read_obj_uv`."""
-    vertices, faces, current = [], {}, None
-    with obj.open() as f:
-        for line in f:
-            if line.startswith("v "):
-                vertices.append(line.split()[1:4])
-            elif line.startswith("f "):
-                faces.setdefault(current, []).append([int(c.split("/")[0]) - 1 for c in line.split()[1:4]])
-            elif line.startswith("usemtl "):
-                current = line.split(maxsplit=1)[1].strip()
-    return np.asarray(vertices, dtype=float), {k: np.asarray(v, dtype=np.int64) for k, v in faces.items()}
-
-
 def _write_obj(src: Path, out: Path, num_uv: int, cells: dict[str, dict[int, np.ndarray]]) -> None:
     """Copy the OBJ `src` to `out`, with one new texture coordinate per cell (after the existing ones) and the
     faces that got a cell pointing at it; everything else as in `src`."""
@@ -201,7 +186,7 @@ def fix_textures(
     (out_dir / mtllib).write_text(opaque_mtl((textured_dir / mtllib).read_text()))
 
     if options.fill_untextured:
-        vertices, positions = _obj_positions(obj)
+        vertices, positions = read_obj_faces(obj)
         xyz, _, rgb, _ = read_openmvs_points(dense_points)
         tree = cKDTree(xyz)
         k = min(options.fill_k, len(xyz))

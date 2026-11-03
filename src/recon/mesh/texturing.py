@@ -128,6 +128,22 @@ def read_obj_uv(obj: Path) -> tuple[str | None, np.ndarray, dict[str, np.ndarray
     return mtllib, uv, per_material, sum(len(idx) for idx in per_material.values())
 
 
+def read_obj_faces(obj: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Vertex positions (V, 3) and, per material, the faces' vertex indices (F, 3) of a triangle OBJ, grouped like
+    `read_obj_uv`."""
+    vertices, faces, current = [], {}, None
+    with obj.open() as f:
+        for line in f:
+            if line.startswith("v "):
+                vertices.append(line.split()[1:4])
+            elif line.startswith("f "):
+                faces.setdefault(current, []).append([int(c.split("/")[0]) - 1 for c in line.split()[1:4]])
+            elif line.startswith("usemtl "):
+                current = line.split(maxsplit=1)[1].strip()
+    per_material = {name: np.asarray(idx, dtype=np.int64).reshape(-1, 3) for name, idx in faces.items()}
+    return np.asarray(vertices, dtype=float).reshape(-1, 3), per_material
+
+
 def _is_sentinel(rgb: np.ndarray) -> np.ndarray:
     """Texels (..., 3) within SENTINEL_TOL of magenta in every channel (BGR or RGB alike)."""
     target = np.array([255, 0, 255], dtype=np.int16)

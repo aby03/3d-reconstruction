@@ -8,11 +8,13 @@ import trimesh
 
 from recon.core.frames import R_GW
 from recon.export.gltf import read_glb, scene_bounds
+from recon.io.ply import read_mesh
 from recon.io.tables import read_json
 from recon.mesh.texturing import read_mtl_maps
 from recon.pipeline.cli import main
 from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s04_align import ARTIFACTS as ALIGN_ARTIFACTS
+from recon.pipeline.stages.s05_dense import ARTIFACTS as DENSE_ARTIFACTS
 from recon.pipeline.stages.s06_mesh_post import ARTIFACTS as MESH_ARTIFACTS
 from recon.pipeline.stages.s07_export import ARTIFACTS
 
@@ -27,6 +29,7 @@ METADATA_KEYS = {
     "bbox_world",
     "num_cameras",
     "num_planes",
+    "transforms_check",
 }
 
 
@@ -47,8 +50,10 @@ def test_manifest(export_run):
     for rel in ARTIFACTS.values():
         assert (export_run / rel).exists()
     assert list(manifest.upstream) == ["mesh_post"]
-    assert manifest.backends == {} and manifest.tools == {"trimesh": trimesh.__version__}
+    assert manifest.backends == {}
+    assert manifest.tools == {"trimesh": trimesh.__version__, "pycolmap": pycolmap.__version__}
     assert manifest.metrics["texture_count"] >= 1 and manifest.metrics["glb_mb"] > 0
+    assert manifest.metrics["transforms_max_px"] < 1.0
 
 
 def test_r_gw():
@@ -78,8 +83,11 @@ def test_glb(export_run, mesh_report, source, mesh_post_run):
     views = [tree["bufferViews"][i["bufferView"]] for i in tree["images"]]
     assert {binary[v["byteOffset"] : v["byteOffset"] + v["byteLength"]] for v in views} == atlases
 
+    # welded on position + UV, with smooth normals
+    assert all("NORMAL" in p["attributes"] for m in tree["meshes"] for p in m["primitives"])
     glb = trimesh.load(export_run / ARTIFACTS["glb"], force="scene")
     assert sum(len(g.faces) for g in glb.geometry.values()) == mesh_report["final"]["faces"]
+    assert sum(len(g.vertices) for g in glb.geometry.values()) < mesh_report["final"]["faces"]  # tiny: 0.76 per face
     bounds_w, bounds_g = scene_bounds(source), scene_bounds(glb)
     tol = 1e-4 * mesh_report["diag"]
     expected = np.stack([R_GW @ bounds_w[0], R_GW @ bounds_w[1]])
@@ -103,6 +111,46 @@ def test_obj(export_run, mesh_report, source):
     assert all(g.visual.material.image is not None for g in copy.geometry.values())
 
 
+def test_ply_stl(export_run, mesh_report, mesh_post_run):
+    geometry = read_mesh(mesh_post_run / MESH_ARTIFACTS["mesh_final_geometry"])
+    colored = read_mesh(export_run / ARTIFACTS["vertex_color_ply"])
+    assert np.array_equal(colored.faces, geometry.faces) and np.allclose(colored.vertices, geometry.vertices)
+    rgb = np.asarray(colored.visual.vertex_colors)[:, :3].astype(int)
+    assert len(rgb) == len(geometry.vertices) and rgb.std() > 10
+    assert not ((np.abs(rgb - [255, 0, 255]) < 40).all(axis=1)).any()  # no magenta
+    stl = trimesh.load(export_run / ARTIFACTS["stl"], process=False, force="mesh")
+    assert len(stl.faces) == mesh_report["final"]["faces"]
+    assert np.abs(stl.bounds - geometry.bounds).max() < 1e-4 * mesh_report["diag"]
+
+
+def test_point_clouds_and_cameras(export_run, align_run, dense_run, sfm_run):
+    assert (export_run / ARTIFACTS["sparse_ply"]).read_bytes() == (align_run / ALIGN_ARTIFACTS["points"]).read_bytes()
+    dense = (dense_run / DENSE_ARTIFACTS["dense_points"]).read_bytes()
+    assert (export_run / ARTIFACTS["dense_ply"]).read_bytes() == dense
+    aligned = pycolmap.Reconstruction(align_run / ALIGN_ARTIFACTS["model"])
+    colmap = pycolmap.Reconstruction(export_run / ARTIFACTS["colmap"])
+    assert colmap.num_reg_images() == aligned.num_reg_images() and colmap.num_points3D() == aligned.num_points3D()
+    undistorted = pycolmap.Reconstruction(dense_run / DENSE_ARTIFACTS["undistorted_model"])
+    colmap_undistorted = pycolmap.Reconstruction(export_run / ARTIFACTS["colmap_undistorted"])
+    assert colmap_undistorted.num_reg_images() == undistorted.num_reg_images()
+
+    transforms = export_run / ARTIFACTS["transforms"]
+    tree = read_json(transforms)
+    assert tree["camera_model"] == "PINHOLE" and tree["world_up"] == "+Z" and tree["fl_x"] > 0
+    assert len(tree["frames"]) == undistorted.num_reg_images()
+    for frame in tree["frames"]:
+        assert frame["file_path"].startswith("../../05_dense/undistorted/images/")
+        assert (transforms.parent / frame["file_path"]).is_file()
+        matrix = np.asarray(frame["transform_matrix"])
+        assert np.allclose(matrix[3], [0, 0, 0, 1]) and np.isclose(np.linalg.det(matrix[:3, :3]), 1.0)
+    check = read_json(export_run / ARTIFACTS["metadata"])["transforms_check"]
+    assert check["points"] == 10 and check["observations"] >= 30 and check["max_px"] < 1.0  # 0.09
+
+    trajectories = sorted(p.name for p in (export_run / ARTIFACTS["trajectory"]).iterdir())
+    assert trajectories == ["room2_tiny_20261021_211400.txt"]
+    assert read_json(export_run / ARTIFACTS["intrinsics"]) == read_json(sfm_run / "intrinsics.json")
+
+
 def test_metadata(export_run, mesh_report, align_run):
     metadata = read_json(export_run / ARTIFACTS["metadata"])
     assert set(metadata) == METADATA_KEYS
@@ -113,12 +161,19 @@ def test_metadata(export_run, mesh_report, align_run):
     aligned = pycolmap.Reconstruction(align_run / ALIGN_ARTIFACTS["model"])
     assert metadata["num_cameras"] == aligned.num_reg_images()
     assert metadata["num_planes"] == mesh_report["planes"]["by_label"]
-    assert set(metadata["files"]) == {"model.glb", "obj/model.obj"}
-    assert metadata["files"]["model.glb"]["up"] == "+Y" and metadata["files"]["obj/model.obj"]["up"] == "+Z"
-    for rel, entry in metadata["files"].items():
+    files = metadata["files"]
+    expected = {ARTIFACTS[k] for k in ("glb", "obj", "vertex_color_ply", "stl", "sparse_ply", "dense_ply")}
+    for key in ("colmap", "colmap_undistorted", "trajectory"):
+        expected |= {p.relative_to(export_run).as_posix() for p in (export_run / ARTIFACTS[key]).iterdir()}
+    assert set(files) == expected | {ARTIFACTS["transforms"], ARTIFACTS["intrinsics"]}
+    assert files["model.glb"]["up"] == "+Y" and files["obj/model.obj"]["up"] == "+Z"
+    assert "up" not in files[ARTIFACTS["intrinsics"]] and files[ARTIFACTS["stl"]]["up"] == "+Z"
+    for rel, entry in files.items():
         data = (export_run / rel).read_bytes()
         assert entry["bytes"] == len(data) and entry["sha256"] == hashlib.sha256(data).hexdigest()
-        assert entry["faces"] == mesh_report["final"]["faces"] and entry["textures"]
+    for rel in ("model.glb", "obj/model.obj", ARTIFACTS["vertex_color_ply"], ARTIFACTS["stl"]):
+        assert files[rel]["faces"] == mesh_report["final"]["faces"]
+    assert files["model.glb"]["textures"] and files[ARTIFACTS["stl"]]["textures"] == []
     bbox = np.array(metadata["bbox_world"])
     assert bbox.shape == (2, 3) and (bbox[1] > bbox[0]).all() and bbox[0, 2] < 0.01 * mesh_report["diag"]
 

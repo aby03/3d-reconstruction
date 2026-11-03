@@ -1,5 +1,5 @@
-"""Binary glTF (GLB) of the textured mesh: Y up, the JPEG atlases embedded unchanged, double-sided PBR materials,
-and a check of the written file.
+"""Binary glTF (GLB) of the textured mesh: Y up, vertices welded with smooth normals, the JPEG atlases embedded
+unchanged, double-sided PBR materials, and a check of the written file.
 
 trimesh writes the scene; its JPEG path re-encodes the atlases (PIL's default quality), so each material gets a
 1x1 placeholder image whose colour names its atlas, and the placeholders are swapped for the atlas bytes after the
@@ -45,6 +45,21 @@ def rotate_bounds(bounds: np.ndarray, R: np.ndarray) -> np.ndarray:
     corners = np.array([[bounds[i, 0], bounds[j, 1], bounds[k, 2]] for i in (0, 1) for j in (0, 1) for k in (0, 1)])
     rotated = corners @ R.T
     return np.stack([rotated.min(axis=0), rotated.max(axis=0)])
+
+
+def weld(geometries: list[trimesh.Trimesh]) -> None:
+    """In place: merge the vertices with the same position and UV (OpenMVS writes three per face) and set smooth
+    vertex normals computed on the mesh welded on position only, over all geometries, so neither UV seams nor atlas
+    boundaries show as shading seams."""
+    for geometry in geometries:
+        geometry.merge_vertices(merge_tex=False, merge_norm=True)
+    vertices = np.concatenate([np.asarray(g.vertices) for g in geometries])
+    offsets = np.cumsum([0] + [len(g.vertices) for g in geometries])
+    faces = np.concatenate([np.asarray(g.faces) + o for g, o in zip(geometries, offsets)])
+    unique, inverse = trimesh.grouping.unique_rows(vertices)
+    normals = trimesh.Trimesh(vertices[unique], inverse[faces], process=False).vertex_normals[inverse]
+    for geometry, start, end in zip(geometries, offsets[:-1], offsets[1:]):
+        geometry.vertex_normals = normals[start:end]
 
 
 def _placeholder(index: int) -> Image.Image:
@@ -108,8 +123,9 @@ def _swap_images(glb: bytes, sources: list[Path]) -> bytes:
 
 
 def write_glb(obj: Path, out: Path, options: GlbOptions | None = None) -> dict[str, Any]:
-    """`out` (GLB) from the textured OBJ `obj` in world W: vertices rotated by R_GW (no node transform), one PBR
-    material per atlas (base colour texture, metallic 0, roughness 1, opaque, double-sided per `options`).
+    """`out` (GLB) from the textured OBJ `obj` in world W: vertices rotated by R_GW (no node transform) and welded
+    with smooth normals, one PBR material per atlas (base colour texture, metallic 0, roughness 1, opaque,
+    double-sided per `options`).
     Returns the source's face count and W bounds."""
     options = options or GlbOptions()
     scene = load_textured(obj)
@@ -131,21 +147,26 @@ def write_glb(obj: Path, out: Path, options: GlbOptions | None = None) -> dict[s
             alphaMode="OPAQUE",
             doubleSided=options.double_sided,
         )
-    glb = _swap_images(scene.export(file_type="glb"), sources)
+    weld(list(scene.geometry.values()))
+    glb = _swap_images(scene.export(file_type="glb", include_normals=True), sources)
     write_bytes(glb, out)
     return {"faces": sum(len(g.faces) for g in scene.geometry.values()), "bounds_w": bounds_w}
 
 
 def validate_glb(path: Path, faces: int, bounds_w: np.ndarray, diag: float) -> dict[str, Any]:
     """Check the GLB `path` against its source (face count, W bounds; `diag` scales the bounds tolerance): valid
-    header and chunks, every image and buffer embedded (no `uri`), materials textured, and the reloaded scene with
-    `faces` faces and the bounds R_GW · `bounds_w`. Raises ValueError on the first failure."""
+    header and chunks, every image and buffer embedded (no `uri`), normals on every primitive, materials textured,
+    and the reloaded scene with `faces` faces and the bounds R_GW · `bounds_w`. Raises ValueError on the first
+    failure."""
     data = path.read_bytes()
     tree, binary = read_glb(data)
     if any("uri" in item for key in ("images", "buffers") for item in tree.get(key, [])):
         raise ValueError(f"{path.name}: external uri in images or buffers")
     if (buffers := tree.get("buffers", [])) and buffers[0]["byteLength"] > len(binary):
         raise ValueError(f"{path.name}: BIN chunk shorter than the buffer")
+    for mesh in tree.get("meshes", []):
+        if any("NORMAL" not in primitive["attributes"] for primitive in mesh["primitives"]):
+            raise ValueError(f"{path.name}: mesh {mesh.get('name')!r} has no vertex normals")
     images = tree.get("images", [])
     if not images or any("bufferView" not in image for image in images):
         raise ValueError(f"{path.name}: images missing or not in a buffer view")
