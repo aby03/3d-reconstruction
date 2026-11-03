@@ -77,7 +77,8 @@ def test_cleanup(report, mesh_post_run):
     before, after = cleanup["before"], cleanup["after"]
     assert after["components"] == 1  # measured 3 -> 1
     assert cleanup["components_removed"] == before["components"] - 1
-    assert 0 <= before["faces"] - after["faces"] < 0.2 * before["faces"]  # stray surface outside the room box
+    # the dense stage already cut the mesh to the room box: little is left to crop (measured 0.2%, was 1.4%)
+    assert 0 <= before["faces"] - after["faces"] < 0.01 * before["faces"]
     assert after["non_manifold_edges"] == 0 and after["non_manifold_vertices"] == 0
     mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
     assert len(mesh.faces) == after["faces"] and len(mesh.vertices) == after["vertices"]

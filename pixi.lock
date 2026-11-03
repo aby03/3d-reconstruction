@@ -328,7 +328,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/exprtk-0.0.3-ha770c72_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/fast_float-8.1.0-hb700be7_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/ffmpeg-8.1.2-gpl_h1bf8424_901.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/filament-1.77.3-x11_ha25ca8e_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/filament-1.79.0-x11_ha25ca8e_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/flann-1.9.2-h7118410_6.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/fmt-12.1.0-h76c4fd7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/fontconfig-2.18.3-h4db4eae_1.conda
@@ -391,8 +391,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libccolamd-3.3.4-hf02c80a_7100101.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcholmod-5.3.1-h9cf07ce_7100101.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang-cpp22.1-22.1.8-default_h0acdd01_11.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang-cpp23.1-23.1.3-default_h0acdd01_1.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang13-23.1.3-default_hf5bde5f_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang-cpp23.1-23.1.4-default_h0acdd01_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libclang13-23.1.4-default_h6e6c352_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcolamd-3.3.4-hf02c80a_7100101.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcublas-12.9.2.10-h676940d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libcudnn-9.10.2.21-hf7e9902_0.conda
@@ -440,7 +440,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libhwloc-2.15.0-default_hd7c4d0c_1001.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libhwy-1.4.0-h57c4cff_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libiconv-1.18-h0cb94f2_3.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/libjpeg-turbo-3.2.0-hb03c661_1.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/libjpeg-turbo-3.2.1-h7cc23a3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libjxl-0.11.2-h174a0a3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/libklu-2.3.5-h95ff59c_7100101.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/liblapack-3.11.0-6_h5e43f62_mkl.conda
@@ -551,7 +551,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/onemkl-license-2025.3.1-hf2ce2f3_12.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/onnxruntime-1.28.0-py312h5fe9fb3_200_cuda129.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/onnxruntime-cpp-1.28.0-he83aaa8_200_cuda129.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/open3d-0.20.0-np2py312h6e80812_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/open3d-0.20.0-np2py312hd45bd8f_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/opencl-headers-2025.06.13-hecca717_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/opencv-5.0.0-qt6_h12f39d8_601.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/openexr-3.4.13-hf734b31_1.conda
@@ -1972,32 +1972,32 @@ packages:
     - ffmpeg >=9.0.2,<10.0a0
   size: 13748369
   timestamp: 1792528642736
-- conda: https://conda.anaconda.org/conda-forge/linux-64/filament-1.77.3-x11_ha25ca8e_0.conda
-  sha256: 69c6f486e970fd64bfb56daddf2390335e3430b050c6d12d1b7bbba59b88a137
-  md5: ce8b75c3c09b2828837f021365ac9342
+- conda: https://conda.anaconda.org/conda-forge/linux-64/filament-1.79.0-x11_ha25ca8e_1.conda
+  sha256: 687301dd5ff65a9e13c06200bae0ad1fda64269466466e59fdb09b232c8b4425
+  md5: e362a2f99185d7db63d023d588a7d3ec
   depends:
   - meshoptimizer
   - tsl_robin_map
   - zstd
-  - libgcc >=15
   - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
   - libstdcxx >=15
   - libxcb >=1.17.0,<2.0a0
-  - assimp >=6.0.5,<7.0a0
   - zstd >=1.5.7,<1.6.0a0
-  - libegl >=1.7.0,<2.0a0
-  - libpng >=1.6.59,<1.7.0a0
   - libzlib >=1.3.2,<2.0a0
+  - assimp >=6.0.5,<7.0a0
+  - libpng >=1.6.59,<1.7.0a0
   - libgl >=1.7.0,<2.0a0
+  - xorg-libx11 >=1.8.14,<2.0a0
   - meshoptimizer >=1.3,<1.4.0a0
-  - xorg-libx11 >=1.8.13,<2.0a0
+  - libegl >=1.7.0,<2.0a0
   license: Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND Zlib
   purls: []
   run_exports:
     weak:
-    - filament >=1.77.3,<1.78.0a0 x11_*
-  size: 10963038
-  timestamp: 1791494534565
+    - filament >=1.79.0,<1.79.1.0a0 x11_*
+  size: 10963352
+  timestamp: 1793249786514
 - conda: https://conda.anaconda.org/conda-forge/linux-64/flann-1.9.2-h7118410_6.conda
   sha256: a14477c5399c799cdbc2363f8fad4fa9747aa30a9cb3f00efe5a70ea39383a01
   md5: b35821df209b0d29b5eee1f0d2504ea2
@@ -3346,47 +3346,47 @@ packages:
     - libclang-cpp22.1 >=22.1.8,<22.2.0a0
   size: 24529645
   timestamp: 1791934037580
-- conda: https://conda.anaconda.org/conda-forge/linux-64/libclang-cpp23.1-23.1.3-default_h0acdd01_1.conda
-  sha256: 3bd94731df161fc3d435067e26db82a89311ada99017534aab8b9157bd283215
-  md5: cf79c9deb118d2cc8d41d6ba21bc6e54
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libclang-cpp23.1-23.1.4-default_h0acdd01_1.conda
+  sha256: 93dde2595e2c339d687be470e1f458f7641a52bda06762055db19237cbf40fac
+  md5: c3831139a4d948c287b4336f1b2059fd
   depends:
   - __glibc >=2.17,<3.0.a0
   - libstdcxx >=15
   - libgcc >=15
-  - zstd >=1.5.7,<1.6.0a0
   - libzlib >=1.3.2,<2.0a0
+  - zstd >=1.5.7,<1.6.0a0
   - libxml2
   - libxml2-16 >=2.15.4
-  - libllvm23 >=23.1.3,<23.2.0a0
+  - libllvm23 >=23.1.4,<23.2.0a0
   license: Apache-2.0 WITH LLVM-exception
   license_family: APACHE
   purls: []
   run_exports:
     weak:
-    - libclang-cpp23.1 >=23.1.3,<23.2.0a0
-  size: 25352733
-  timestamp: 1791933826307
-- conda: https://conda.anaconda.org/conda-forge/linux-64/libclang13-23.1.3-default_hf5bde5f_1.conda
-  sha256: 1875a40306f7f9740b1dffa3b96ff4dd06d7c7fe4ea7fcb74a63af0ff10891e3
-  md5: ac17255d36cb4e943cfbbcc2776483a0
+    - libclang-cpp23.1 >=23.1.4,<23.2.0a0
+  size: 25352611
+  timestamp: 1793320134248
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libclang13-23.1.4-default_h6e6c352_1.conda
+  sha256: 0d973a298e2e9efb1f563e0e1f2a39cc7704c4393e1aad1128c95b9b85bff1d1
+  md5: 2ed7cfa18d17f82b546ee2ed46bf2f7b
   depends:
-  - libclang-cpp23.1 ==23.1.3 default_h0acdd01_1
+  - libclang-cpp23.1 ==23.1.4 default_h0acdd01_1
   - __glibc >=2.17,<3.0.a0
   - libstdcxx >=15
   - libgcc >=15
-  - zstd >=1.5.7,<1.6.0a0
   - libzlib >=1.3.2,<2.0a0
+  - zstd >=1.5.7,<1.6.0a0
   - libxml2
   - libxml2-16 >=2.15.4
-  - libllvm23 >=23.1.3,<23.2.0a0
+  - libllvm23 >=23.1.4,<23.2.0a0
   license: Apache-2.0 WITH LLVM-exception
   license_family: APACHE
   purls: []
   run_exports:
     weak:
-    - libclang13 >=23.1.3
-  size: 15440090
-  timestamp: 1791933826307
+    - libclang13 >=23.1.4
+  size: 15440270
+  timestamp: 1793320134248
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libcolamd-3.3.4-hf02c80a_7100101.conda
   sha256: 00d1b976b914f0c20ae6f81f4e4713fa87717542eba8757b9a3c9e8abcc29858
   md5: 56d4c5542887e8955f21f8546ad75d9d
@@ -4234,6 +4234,21 @@ packages:
     - libjpeg-turbo >=3.2.0,<4.0a0
   size: 650434
   timestamp: 1785896381946
+- conda: https://conda.anaconda.org/conda-forge/linux-64/libjpeg-turbo-3.2.1-h7cc23a3_0.conda
+  sha256: 2f7d092a3212884825c43814575225fde8a9190611bc0e38c55e0dae45e329ac
+  md5: 5fd2b2218f7c28c71e95738a4fffaf78
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=15
+  constrains:
+  - jpeg <0.0.0a
+  license: IJG AND BSD-3-Clause AND Zlib
+  purls: []
+  run_exports:
+    weak:
+    - libjpeg-turbo >=3.2.1,<4.0a0
+  size: 653905
+  timestamp: 1793157024388
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libjxl-0.11.2-h174a0a3_1.conda
   sha256: 0c8a78c6a42a6e4c6de3a5e82d692f60400d43f4cc80591745f28b37daad9c70
   md5: 850f48943d6b4589800a303f0de6a816
@@ -6697,62 +6712,64 @@ packages:
     - onnxruntime-cpp >=1.28.0,<1.28.1.0a0
   size: 258947447
   timestamp: 1786191043196
-- conda: https://conda.anaconda.org/conda-forge/linux-64/open3d-0.20.0-np2py312h6e80812_0.conda
-  sha256: 425ceeeac905b7dd7136bbd2e392d1f4561e75730ce4910fddae494ae368c858
-  md5: 8caf95aa371edd3a91669e19691aea86
+- conda: https://conda.anaconda.org/conda-forge/linux-64/open3d-0.20.0-np2py312hd45bd8f_2.conda
+  sha256: bd0e7a50063b320e9b37d4d9f5113c83f6fe88d30c8dad643c3870f6eea92267
+  md5: c6c2375283839ae41451ed62fb836758
   depends:
   - numpy
   - python
   - plotly
   - dash
+  - filament >=1.79.0,<1.79.1.0a0
   - _openmp_mutex >=4.5
-  - libstdcxx >=15
-  - libgcc >=15
   - __glibc >=2.17,<3.0.a0
-  - liblapacke >=3.9.0,<4.0a0
-  - xorg-libxdamage >=1.1.6,<2.0a0
-  - liblzf >=3.6,<3.7.0a0
-  - qhull >=2020.2,<2020.3.0a0
-  - libcblas >=3.9.0,<4.0a0
-  - libopengl >=1.7.0,<2.0a0
-  - python_abi 3.12.* *_cp312
-  - assimp >=6.0.5,<7.0a0
-  - libtinyobjloader ==2.0.0rc13
-  - libcurl >=8.22.0,<9.0a0
-  - libjpeg-turbo >=3.2.0,<4.0a0
-  - fmt >=12.1.0,<12.2.0a0
-  - libvulkan-loader >=1.4.357.0,<2.0a0
-  - spz >=3.0.0,<3.0.1.0a0
-  - zstd >=1.5.7,<1.6.0a0
-  - libxcb >=1.17.0,<2.0a0
-  - qt6-main >=6.11.2,<7.0a0
-  - embree >=4.4.1,<4.5.0a0
-  - pybind11-abi ==11
-  - vtk-base >=9.7.0,<9.7.1.0a0
-  - libglx >=1.7.0,<2.0a0
-  - libzlib >=1.3.2,<2.0a0
-  - xorg-libxfixes >=6.0.2,<7.0a0
+  - libgcc >=15
+  - libstdcxx >=15
   - gtest >=1.18.0,<1.18.1.0a0
-  - libpng >=1.6.58,<1.7.0a0
-  - libclang13 >=23.1.1
-  - libgl >=1.7.0,<2.0a0
-  - numpy >=1.25,<3
-  - glew >=2.3.0,<2.4.0a0
-  - filament >=1.77.0,<1.78.0a0 x11_*
-  - zeromq >=4.3.5,<4.4.0a0
+  - tbb >=2023.1.0
+  - libvulkan-loader >=1.4.357.0,<2.0a0
+  - qt6-main >=6.11.2,<7.0a0
+  - libtinyobjloader ==2.0.0rc13
+  - xorg-libx11 >=1.8.14,<2.0a0
+  - zstd >=1.5.7,<1.6.0a0
   - jsoncpp >=1.9.8,<1.9.9.0a0
   - glfw >=3.5.1,<4.0a0
-  - tbb >=2023.1.0
-  - xorg-libx11 >=1.8.13,<2.0a0
+  - libcblas >=3.9.0,<4.0a0
+  - zeromq >=4.3.5,<4.4.0a0
+  - libjpeg-turbo >=3.2.1,<4.0a0
+  - glew >=2.3.0,<2.4.0a0
+  - liblapacke >=3.9.0,<4.0a0
+  - libclang13 >=23.1.4
+  - libgl >=1.7.0,<2.0a0
+  - libxcb >=1.17.0,<2.0a0
+  - embree >=4.4.1,<4.5.0a0
+  - libpng >=1.6.59,<1.7.0a0
+  - libcurl >=8.23.0,<9.0a0
+  - python_abi 3.12.* *_cp312
+  - numpy >=1.25,<3
+  - libzlib >=1.3.2,<2.0a0
+  - qhull >=2020.2,<2020.3.0a0
+  - xorg-libxdamage >=1.1.6,<2.0a0
+  - filament >=1.79.0,<1.79.1.0a0 x11_*
+  - liblzf >=3.6,<3.7.0a0
+  - assimp >=6.0.5,<7.0a0
+  - vtk-base >=9.7.0,<9.7.1.0a0
+  - libglx >=1.7.0,<2.0a0
+  - libopengl >=1.7.0,<2.0a0
+  - xorg-libxfixes >=6.0.2,<7.0a0
+  - fmt >=12.1.0,<12.2.0a0
+  - pybind11-abi ==11
+  - spz >=3.0.0,<3.0.1.0a0
   license: MIT
   license_family: MIT
   purls:
-  - pkg:pypi/open3d?source=compressed-mapping
+  - pkg:pypi/open3d?source=hash-mapping
+  - pkg:pypi/open3d-cpu?source=hash-mapping
   run_exports:
     weak:
     - open3d >=0.20.0,<0.20.1.0a0
-  size: 91701193
-  timestamp: 1789936275822
+  size: 91732624
+  timestamp: 1793310765912
 - conda: https://conda.anaconda.org/conda-forge/linux-64/opencl-headers-2025.06.13-hecca717_0.conda
   sha256: 8de2f0cd8a659b01abf86e7fbb8cea4f28ada62fd288429a2bbc040db1b98dd0
   md5: c930c8052d780caa41216af7de472226

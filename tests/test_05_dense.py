@@ -21,7 +21,7 @@ from recon.pipeline.config import PipelineConfig, load_config, select_hardware
 from recon.pipeline.device import DeviceInfo, probe_device
 from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s04_align import ARTIFACTS as ALIGN_ARTIFACTS
-from recon.pipeline.stages.s05_dense import ARTIFACTS, OPTIONAL_ARTIFACTS
+from recon.pipeline.stages.s05_dense import ARTIFACTS, FILTERED_PLY, OPTIONAL_ARTIFACTS
 from recon.sfm.quality import camera_centres
 
 REPORT_KEYS = {
@@ -34,6 +34,9 @@ REPORT_KEYS = {
     "openmvs_version",
     "densify",
     "num_dense_points",
+    "num_dense_points_raw",
+    "filter",
+    "mesh_crop",
     "sparse_bbox",
     "diag",
     "dense",
@@ -125,7 +128,9 @@ def test_report(report, aligned):
     assert report["num_images"] == aligned.num_reg_images()
     assert list(report["tools"]) == TOOLS and all(t["returncode"] == 0 for t in report["tools"].values())
     assert report["cuda_device"] == (0 if report["backend"] == "cuda" else -2)
-    assert set(report["timings"]) == {"load", "undistort", "import", "densify", "mesh", "refine", "preview", "outputs"}
+    assert set(report["timings"]) == {
+        "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "outputs"
+    }
     assert report["oom_retries"] == [] and all(t["calls"] == 1 for t in report["tools"].values())
     # ~1857 px >> 1 = 928 (the undistorted size varies a little with the SfM intrinsics): level 2 is clamped to 1
     long_side = max(max(c["width"], c["height"]) for c in report["undistorted"].values())
@@ -133,6 +138,23 @@ def test_report(report, aligned):
     assert report["num_dense_points"] > 50_000  # measured 186k
     mesh = report["mesh_raw"]
     assert mesh["faces"] > 50_000 and mesh["largest_component_frac"] > 0.9  # measured 298k, 1.0
+
+
+def test_filter(report, dense_run, sparse_box):
+    f = report["filter"]
+    assert f["enabled"] and f["input"] == report["num_dense_points_raw"]
+    removed = f["outside_box"] + f["statistical"] + f["radius"]
+    assert 0 < removed < 0.05 * f["input"]  # measured 3.6 k of 187 k: a few stray points, not the room
+    assert f["output"] == f["input"] - removed == report["num_dense_points"]
+    lo, hi = np.array(f["box"]["min"]), np.array(f["box"]["max"])
+    cloud = np.asarray(trimesh.load(dense_run / ARTIFACTS["dense_points"]).vertices)
+    assert (cloud >= lo - 1e-3).all() and (cloud <= hi + 1e-3).all()
+    # ReconstructMesh read the filtered cloud, and RefineMesh got the mesh cut to the same box
+    assert (dense_run / "openmvs" / FILTERED_PLY).is_file()
+    crop = report["mesh_crop"]
+    assert crop["faces_after"] == report["mesh_raw"]["faces"] <= crop["faces_before"]
+    mesh = trimesh.load(dense_run / ARTIFACTS["mesh_raw"], process=False, force="mesh")
+    assert (mesh.vertices >= lo - 1e-6).all() and (mesh.vertices <= hi + 1e-6).all()
 
 
 def test_world_frame(report, sparse_box, aligned, dense_run):

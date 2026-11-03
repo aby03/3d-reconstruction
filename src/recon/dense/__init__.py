@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from recon.dense.filter import FilterOptions
 from recon.dense.openmvs import MeshOptions, OpenMvsOptions, PreviewOptions, RefineOptions
 from recon.dense.undistort import UndistortOptions
 
@@ -8,6 +9,7 @@ from recon.dense.undistort import UndistortOptions
 class DenseOptions:
     undistort: UndistortOptions = field(default_factory=UndistortOptions)
     openmvs: OpenMvsOptions = field(default_factory=OpenMvsOptions)
+    filter: FilterOptions = field(default_factory=FilterOptions)
     mesh: MeshOptions = field(default_factory=MeshOptions)
     refine: RefineOptions = field(default_factory=RefineOptions)
     preview: PreviewOptions = field(default_factory=PreviewOptions)

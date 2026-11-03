@@ -138,6 +138,17 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     crop_to_roi: false           # OpenMVS's estimated ROI (densify and mesh) cuts the upper walls (30% of the points on tiny)
     keep_dmaps: false            # depth maps (~11.6 MB per image at level 1) are removed after fusion
     bin_dir: null                # null: OpenMVS from PATH (pixi adds .local/openmvs/bin/OpenMVS)
+  filter:                        # outlier removal on the dense cloud before ReconstructMesh (the mesh is cropped to the box before RefineMesh)
+    enabled: true
+    roi:                         # drop points outside the dense span of each axis (same box as mesh_post.roi)
+      enabled: true
+      bin_frac: 0.005
+      min_density_frac: 0.15
+      margin_frac: 0.01
+    stat_neighbors: 30           # statistical filter: neighbours per point ...
+    stat_std_ratio: 3.0          # ... and the std-devs above the mean neighbour distance that remove a point
+    radius_frac: 0.01            # radius filter: radius as a fraction of the diagonal ...
+    radius_min_neighbors: 8      # ... and the neighbours a point needs inside it
   mesh:                          # ReconstructMesh
     remove_spurious: 20          # remove faces with too long edges / isolated components (0: off)
     remove_spikes: true

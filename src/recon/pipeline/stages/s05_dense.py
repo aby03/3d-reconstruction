@@ -28,11 +28,13 @@ from recon.dense.openmvs import (
     refine_mesh,
     texture_preview,
 )
+from recon.dense.filter import filter_points
 from recon.dense.undistort import undistort
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
-from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points, write_points
+from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points, select_openmvs_points, write_points
 from recon.io.tables import read_json, write_json
 from recon.io.tools import ToolRunner
+from recon.mesh.cleanup import cleanup
 from recon.pipeline.device import Backend
 from recon.pipeline.stage import Stage, StageOutput, register_stage
 from recon.pipeline.stages import s03_sfm, s04_align
@@ -44,6 +46,8 @@ log = logging.getLogger(__name__)
 STAGE = "dense"
 DIR_NAME = "05_dense"
 WORK_DIR = "openmvs"
+FILTERED_PLY = "scene_dense_filtered.ply"  # the dense cloud after outlier removal, with views
+CROPPED_PLY = "scene_dense_mesh_crop.ply"  # the graph-cut mesh cut to the room box, RefineMesh's input
 MIN_INSIDE_FRAC = 0.99
 MIN_LARGEST_COMPONENT_FRAC = 0.9
 MIN_DENSE_POINTS = 1000
@@ -185,7 +189,25 @@ def run_dense(
     timings["densify"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    mesh = reconstruct_mesh(runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi, cpu_fallback)
+    xyz, normals, rgb, _ = read_openmvs_points(dense.ply)
+    num_raw_points, filter_report, filtered = len(xyz), None, None
+    if options.filter.enabled:
+        keep, filter_report = filter_points(xyz, diag, options.filter)
+        select_openmvs_points(dense.ply, work_dir / FILTERED_PLY, keep)
+        xyz, normals, rgb = xyz[keep], normals[keep], rgb[keep]
+        filtered = FILTERED_PLY
+    timings["filter"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    mesh = reconstruct_mesh(
+        runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi, cpu_fallback, points=filtered
+    )
+    mesh_ply, crop_report = mesh.ply, None
+    if filter_report is not None and filter_report["box"] is not None:
+        box_room = (np.array(filter_report["box"]["min"]), np.array(filter_report["box"]["max"]))
+        cropped = cleanup(mesh.ply, work_dir / CROPPED_PLY, bounds=box_room)
+        mesh_ply = work_dir / CROPPED_PLY
+        crop_report = {"faces_before": cropped.before["faces"], "faces_after": cropped.after["faces"]}
     timings["mesh"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -193,14 +215,14 @@ def run_dense(
     refine_device = cuda_device(refine_backend, gpu_index)
     refined = None
     if options.refine.enabled:
-        refined = refine_mesh(runner, work_dir, options.refine, refine_device, cpu_fallback)
+        refined = refine_mesh(runner, work_dir, options.refine, refine_device, cpu_fallback, mesh_ply.name)
         if refined.timed_out:
             warnings.append(
                 f"{REFINE_MESH} stopped after {options.refine.max_minutes:g} min; mesh_refined.ply is the raw mesh"
             )
         else:
             artifacts["mesh_refine_openmvs"] = OPTIONAL_ARTIFACTS["mesh_refine_openmvs"]
-    refined_ply = refined.ply if refined is not None and refined.ply is not None else mesh.ply
+    refined_ply = refined.ply if refined is not None and refined.ply is not None else mesh_ply
     shutil.copyfile(refined_ply, out / ARTIFACTS["mesh_refined"])
     timings["refine"] = time.perf_counter() - t0
 
@@ -214,9 +236,8 @@ def run_dense(
     timings["preview"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    xyz, normals, rgb, _ = read_openmvs_points(dense.ply)
     write_points(out / ARTIFACTS["dense_points"], xyz, normals, rgb)
-    shutil.copyfile(mesh.ply, out / ARTIFACTS["mesh_raw"])
+    shutil.copyfile(mesh_ply, out / ARTIFACTS["mesh_raw"])
     mesh_raw = _mesh_report(read_mesh(out / ARTIFACTS["mesh_raw"]), box)
     ran = refined is not None and refined.ply is not None
     mesh_refined = _mesh_report(read_mesh(out / ARTIFACTS["mesh_refined"]), box) if ran else dict(mesh_raw)
@@ -227,8 +248,8 @@ def run_dense(
 
     if len(xyz) < MIN_DENSE_POINTS:
         warnings.append(f"only {len(xyz)} dense points")
-    if dense.num_points != len(xyz):
-        warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {len(xyz)}")
+    if dense.num_points != num_raw_points:
+        warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {num_raw_points}")
     retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
     warnings += [retry_warning(r) for r in retries]
     meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
@@ -268,6 +289,9 @@ def run_dense(
             "crop_to_roi": o.crop_to_roi,
         },
         "num_dense_points": len(xyz),
+        "num_dense_points_raw": num_raw_points,
+        "filter": {"enabled": options.filter.enabled, **(filter_report or {})},
+        "mesh_crop": crop_report,
         "sparse_bbox": {"min": box[0].tolist(), "max": box[1].tolist()},
         "diag": diag,
         "dense": dense_stats,

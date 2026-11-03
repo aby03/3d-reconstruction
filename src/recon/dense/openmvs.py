@@ -139,10 +139,13 @@ def densify_args(options: OpenMvsOptions, device: int) -> list[str]:
     )
 
 
-def reconstruct_mesh_args(options: MeshOptions, device: int, crop_to_roi: bool = False) -> list[str]:
+def reconstruct_mesh_args(
+    options: MeshOptions, device: int, crop_to_roi: bool = False, points: str | None = None
+) -> list[str]:
     o = options
     return _argv(
         "-w", ".", "-i", SCENE_DENSE,
+        *(("--pointcloud-file", points) if points else ()),
         "--remove-spurious", o.remove_spurious,
         "--remove-spikes", _flag(o.remove_spikes),
         "--close-holes", o.close_holes,
@@ -153,10 +156,10 @@ def reconstruct_mesh_args(options: MeshOptions, device: int, crop_to_roi: bool =
     )
 
 
-def refine_mesh_args(options: RefineOptions, device: int) -> list[str]:
+def refine_mesh_args(options: RefineOptions, device: int, mesh: str = MESH_PLY) -> list[str]:
     o = options
     return _argv(
-        "-w", ".", "-i", SCENE_DENSE, "-m", MESH_PLY, "-o", REFINED_PLY,
+        "-w", ".", "-i", SCENE_DENSE, "-m", mesh, "-o", REFINED_PLY,
         "--resolution-level", o.resolution_level,
         "--max-face-area", o.max_face_area,
         "--scales", o.scales,
@@ -342,23 +345,30 @@ def reconstruct_mesh(
     device: int,
     crop_to_roi: bool = False,
     cpu_fallback: bool = False,
+    points: str | None = None,
 ) -> MeshResult:
-    """Delaunay + graph-cut mesh of the dense cloud into `work_dir/scene_dense_mesh.ply`."""
+    """Delaunay + graph-cut mesh of the dense cloud into `work_dir/scene_dense_mesh.ply`; `points` (a PLY with
+    views in `work_dir`) replaces the cloud stored in the scene."""
     used, results, retries = run_with_cpu_fallback(
-        runner, RECONSTRUCT_MESH, lambda d: reconstruct_mesh_args(options, d, crop_to_roi), work_dir, device,
+        runner, RECONSTRUCT_MESH, lambda d: reconstruct_mesh_args(options, d, crop_to_roi, points), work_dir, device,
         cpu_fallback,
     )
     return MeshResult(check_output(RECONSTRUCT_MESH, work_dir / MESH_PLY), used, False, retries, results)
 
 
 def refine_mesh(
-    runner: ToolRunner, work_dir: Path, options: RefineOptions, device: int, cpu_fallback: bool = False
+    runner: ToolRunner,
+    work_dir: Path,
+    options: RefineOptions,
+    device: int,
+    cpu_fallback: bool = False,
+    mesh: str = MESH_PLY,
 ) -> MeshResult:
-    """Photometric refinement of `work_dir/scene_dense_mesh.ply` into `work_dir/scene_dense_mesh_refine.ply`.
+    """Photometric refinement of the mesh `work_dir/<mesh>` (default `scene_dense_mesh.ply`) into `work_dir/scene_dense_mesh_refine.ply`.
     Stopped after `options.max_minutes`: the result then has `ply=None, timed_out=True`."""
     try:
         used, results, retries = run_with_cpu_fallback(
-            runner, REFINE_MESH, lambda d: refine_mesh_args(options, d), work_dir, device, cpu_fallback,
+            runner, REFINE_MESH, lambda d: refine_mesh_args(options, d, mesh), work_dir, device, cpu_fallback,
             options.resolution_level, options.max_minutes * 60,
         )
     except ToolTimeout:

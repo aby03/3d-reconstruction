@@ -126,3 +126,23 @@ def mesh_stats(mesh: trimesh.Trimesh) -> dict[str, Any]:
         "components": len(sizes),
         "largest_component_frac": float(sizes.max() / num_faces) if num_faces else 0.0,
     }
+
+
+def select_openmvs_points(src: Path, dst: Path, keep: np.ndarray) -> Path:
+    """Write the vertices of the OpenMVS point cloud `src` where `keep` (N,) is true to `dst`, records (and their
+    view lists) copied unchanged, so OpenMVS can read it back as a dense point cloud."""
+    buf = Path(src).read_bytes()
+    count, start, scalars, lists = _read_header(buf)
+    if len(keep) != count:
+        raise ValueError(f"{src}: {count} vertices, mask of {len(keep)}")
+    fixed = sum(np.dtype(dtype).itemsize for _, dtype in scalars)
+    starts = _record_starts(buf, start, count, fixed, lists) if lists else start + fixed * np.arange(count)
+    ends = np.append(starts[1:], len(buf))
+    header = buf[: start - len(b"end_header\n")].decode("ascii")
+    header = header.replace(f"element vertex {count}", f"element vertex {int(keep.sum())}")
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with dst.open("wb") as f:
+        f.write((header + "end_header\n").encode("ascii"))
+        for i in np.flatnonzero(keep):
+            f.write(buf[starts[i] : ends[i]])
+    return dst
