@@ -55,11 +55,11 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage: ingest ... dense, mesh_post
+pixi run recon run --input data/room2_tiny                     # every stage: ingest ... dense, mesh_post, export
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense, mesh_post and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense, mesh_post, export), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
 ```bash
 pixi run recon run --input data/room2_tiny --resume                    # the latest run
 pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
@@ -79,7 +79,7 @@ pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`, `dense`, `mesh_post`). Unknown keys and wrong types are errors that name the full key path. Layers, later wins: `default.yaml`, the hardware preset, `--config` files, `--set`.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`, `dense`, `mesh_post`, `export`). Unknown keys and wrong types are errors that name the full key path. Layers, later wins: `default.yaml`, the hardware preset, `--config` files, `--set`.
 
 **Hardware presets.** `configs/hardware/cuda_6gb.yaml` (4–10 GB of GPU memory: the defaults written out), `cuda_large.yaml` (10 GB or more: full-resolution depth maps, 8 neighbour views) and `cpu.yaml` (no CUDA OpenMVS, or `device.preference: cpu`: everything on the CPU, depth maps at a quarter of the image size). `--hardware auto` (the default) picks one by the probed GPU, `--hardware cpu` forces a preset, `--hardware none` skips the layer. The preset is named in the first line of the run's `config.resolved.yaml` and under `hardware` in `run_manifest.json`.
 
@@ -202,7 +202,25 @@ D=$(ls -d outputs/room2_tiny/runs/*/06_mesh_post | tail -1)
 cat $D/stage_manifest.json $D/reports/mesh_report.json
 ls $D/textured/
 ```
-In `mesh_report.json`: `cleanup.before`/`after` (vertices, faces, connected pieces, boundary and non-manifold edges), `decimate` (faces in/out, budget), `final` (the texturing input: pieces, share inside the sparse bounding box, ≥ 0.99 expected), `texture` (`atlas_count`, `atlas_size`, `atlas_empty_frac`: magenta share of the atlas, `black_texel_frac`: near-black share of the used texels, `untextured_face_frac`: faces whose texture is magenta, a warning above 1%; tiny 0.9%, room2 1.0%), time and GPU memory per tool. Open `textured/mesh.obj` in MeshLab (Z up): walls and floor carry the photos, magenta marks faces no keyframe saw. OpenMVS's MTL says `Tr 1.000000`, which some viewers read as fully transparent.
+In `mesh_report.json`: `cleanup.before`/`after` (vertices, faces, connected pieces, boundary and non-manifold edges), `decimate` (faces in/out, budget), `final` (the texturing input: pieces, share inside the sparse bounding box, ≥ 0.99 expected), `texture` (`atlas_count`, `atlas_size`, `atlas_empty_frac`: magenta share of the atlas, `black_texel_frac`: near-black share of the used texels, `untextured_face_frac`: faces whose texture is magenta, a warning above 1%; tiny 0.9%, room2 1.0%), time and GPU memory per tool. Open `textured/mesh.obj` in MeshLab (Z up): walls and floor carry the photos, magenta marks faces no keyframe saw. OpenMVS's MTL says `Tr 1.000000`, which some viewers read as fully transparent; the exported `07_export/obj/` copy fixes that.
+
+### Step 7: export
+Needs a finished mesh_post step.
+```bash
+pixi run recon export --input data/room2_tiny
+```
+Same as `recon run --only export --resume`. Turns `06_mesh_post/textured/` into the deliverables in `07_export/`:
+- `model.glb`: binary glTF, **Y up** (the vertices are rotated `x_G = (x_W, z_W, −y_W)`, no node transform), the JPEG atlases embedded unchanged (no external files), one PBR material per atlas (base-colour texture, metallic 0, roughness 1, opaque, double-sided so the room shows from inside; `export.glb.double_sided`).
+- `obj/model.obj`, `obj/model.mtl`, `obj/textures/model_NN.jpg`: the same mesh **Z up** (world W), MTL made opaque (`Tr 0`, `d 1`); the first line of the OBJ says `# world W: +Z up, units <units>`.
+- `metadata.json`: scene, run id, sequences, `pipeline_version` (git commit), `units` (`arbitrary` unless the alignment set a metric scale: a viewer's "metres" are then only a convention), the world frame, per file its up axis, faces, vertices, texture sizes, bytes and sha256, the W bounding box and the number of cameras.
+
+Every file is reloaded and checked (GLB header and chunk lengths, no external URIs, face count and bounding box against the source); a failed check fails the stage. Tiny: 8.5 MB GLB in 1 s; room2: 50 MB.
+
+**Viewing the GLB.** Drag `07_export/model.glb` into https://gltf-viewer.donmccurdy.com (the file is opened locally in the browser, nothing is uploaded) or import it in Blender (File → Import → glTF 2.0). The floor is at y = 0 and the room stands upright; orbit inside it to see the walls.
+```bash
+ls -d outputs/room2_tiny/runs/*/07_export/model.glb | tail -1
+cat $(ls -d outputs/room2_tiny/runs/*/07_export | tail -1)/metadata.json
+```
 
 ### Tests
 ```bash

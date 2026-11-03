@@ -2,6 +2,7 @@
 
 android_device (D): x right, y toward the top edge, z out of the screen, in the device's natural orientation.
 cam (C): OpenCV camera of the upright image, x right, y down, z forward.
+world (W): Z up, floor z = 0. gltf (G): Y up, x_G = (x_W, z_W, -y_W).
 """
 
 import numpy as np
@@ -11,6 +12,8 @@ CAM = "cam"
 
 DEVICE_ORIENTATIONS = (0, 90, 180, 270)
 BACK_CAMERA_SENSOR_ORIENTATION = 90  # usual for phones; not stored in the capture files
+
+R_GW = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])  # gltf <- world: Z up to Y up
 
 
 def _rot_z(deg: float) -> np.ndarray:

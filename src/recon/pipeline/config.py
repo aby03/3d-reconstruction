@@ -15,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 from recon.align import AlignOptions
 from recon.capture.open_camera_sensors import LoaderOptions
 from recon.dense import DenseOptions
+from recon.export import ExportOptions
 from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
 from recon.mesh import MeshPostOptions
@@ -49,6 +50,7 @@ class PipelineConfig:
     align: AlignOptions = field(default_factory=AlignOptions)
     dense: DenseOptions = field(default_factory=DenseOptions)
     mesh_post: MeshPostOptions = field(default_factory=MeshPostOptions)
+    export: ExportOptions = field(default_factory=ExportOptions)
 
 
 SECTIONS: dict[str, type] = {f.name: f.type for f in dataclasses.fields(PipelineConfig)}

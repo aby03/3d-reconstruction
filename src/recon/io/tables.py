@@ -68,6 +68,10 @@ def write_json(obj: Any, path: Path | str) -> Path:
     return _write_atomic(Path(path), lambda tmp: tmp.write_text(text))
 
 
+def write_bytes(data: bytes, path: Path | str) -> Path:
+    return _write_atomic(Path(path), lambda tmp: tmp.write_bytes(data))
+
+
 def read_json(path: Path | str) -> Any:
     return json.loads(Path(path).read_text())
 

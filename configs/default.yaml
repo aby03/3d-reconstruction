@@ -174,3 +174,7 @@ mesh_post:                       # step 6: clean + decimate the dense mesh, text
     virtual_face_images: 0
     sharpness_weight: 0.5
     patch_packing_heuristic: 3
+
+export:                          # step 7: model.glb (Y up, textures embedded) + obj/ (Z up) + metadata.json
+  glb:
+    double_sided: true           # room interiors are seen from inside
