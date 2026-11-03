@@ -4,6 +4,7 @@ small connected components."""
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pymeshlab
 
 
@@ -47,9 +48,15 @@ def save(ms: pymeshlab.MeshSet, path: Path) -> Path:
     return path
 
 
-def cleanup(src: Path, out: Path, options: CleanupOptions | None = None) -> CleanupResult:
+def cleanup(
+    src: Path,
+    out: Path,
+    options: CleanupOptions | None = None,
+    bounds: tuple[np.ndarray, np.ndarray] | None = None,
+) -> CleanupResult:
     """Clean the mesh `src` into the PLY `out`, in this order: duplicate vertices and faces, zero-area faces,
-    unreferenced vertices, non-manifold edges (their faces removed) and vertices (split), then components below
+    unreferenced vertices, faces with a corner outside the `bounds` box (min, max) when given, non-manifold edges
+    (their faces removed) and vertices (split), then components below
     `min_component_frac` of the faces or `min_component_diam_frac` of the bbox diagonal."""
     options = options or CleanupOptions()
     ms = load(src)
@@ -58,6 +65,14 @@ def cleanup(src: Path, out: Path, options: CleanupOptions | None = None) -> Clea
     ms.meshing_remove_duplicate_faces()
     ms.meshing_remove_null_faces()
     ms.meshing_remove_unreferenced_vertices()
+    if bounds is not None:
+        lo, hi = bounds
+        outside = " || ".join(
+            f"({a}{k} < {float(lo[i])!r} || {a}{k} > {float(hi[i])!r})" for i, a in enumerate("xyz") for k in range(3)
+        )
+        ms.compute_selection_by_condition_per_face(condselect=outside)
+        ms.meshing_remove_selected_vertices_and_faces()
+        ms.meshing_remove_unreferenced_vertices()
     ms.meshing_repair_non_manifold_edges(method=0)
     ms.meshing_repair_non_manifold_vertices()
     min_faces = int(options.min_component_frac * ms.current_mesh().face_number())

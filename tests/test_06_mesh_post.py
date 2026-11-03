@@ -27,6 +27,7 @@ REPORT_KEYS = {
     "input_faces",
     "units",
     "diag",
+    "roi",
     "cleanup",
     "holes",
     "planes",
@@ -76,24 +77,21 @@ def test_cleanup(report, mesh_post_run):
     before, after = cleanup["before"], cleanup["after"]
     assert after["components"] == 1  # measured 3 -> 1
     assert cleanup["components_removed"] == before["components"] - 1
-    assert 0 <= before["faces"] - after["faces"] < 0.01 * before["faces"]  # 32 faces, 0 in some dense runs
+    assert 0 <= before["faces"] - after["faces"] < 0.2 * before["faces"]  # stray surface outside the room box
     assert after["non_manifold_edges"] == 0 and after["non_manifold_vertices"] == 0
     mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
     assert len(mesh.faces) == after["faces"] and len(mesh.vertices) == after["vertices"]
+    lo, hi = np.array(report["roi"]["min"]), np.array(report["roi"]["max"])
+    assert (mesh.vertices >= lo - 1e-6).all() and (mesh.vertices <= hi + 1e-6).all()
 
 
 def test_holes(report, mesh_post_run):
-    # tiny has one boundary loop, the outer one (~400 edges, perimeter 3.8x the diagonal): nothing to close
-    assert report["holes"] == {
-        "loops": 1,
-        "filled": 0,
-        "filled_faces": 0,
-        "skipped_outer": 1,
-        "skipped_large": 0,
-        "largest_loop_edges": report["cleanup"]["after"]["boundary_edges"],
-    }
+    # tiny's outer boundary (perimeter ~3.8x the diagonal) is never closed; the room box may leave a few loops
+    holes = report["holes"]
+    assert holes["skipped_outer"] >= 1
+    assert holes["loops"] == holes["filled"] + holes["skipped_outer"] + holes["skipped_large"]
     clean, filled = mesh_post_run / ARTIFACTS["mesh_clean"], mesh_post_run / ARTIFACTS["mesh_holes_filled"]
-    assert filled.read_bytes() == clean.read_bytes()
+    assert (filled.read_bytes() == clean.read_bytes()) == (holes["filled"] == 0)
 
 
 def test_holes_punched(report, mesh_post_run, tmp_path):
@@ -105,16 +103,19 @@ def test_holes_punched(report, mesh_post_run, tmp_path):
     punched = trimesh.Trimesh(mesh.vertices, mesh.faces[~removed], process=False)
     punched.remove_unreferenced_vertices()
     punched.export(tmp_path / "punched.ply")
-    outer = report["cleanup"]["after"]["boundary_edges"]
+    before = sorted(len(loop) for loop in boundary_loops(mesh))
     loops = sorted(len(loop) for loop in boundary_loops(punched))
-    assert loops[-1] == outer and len(loops) == 2
+    assert len(loops) == len(before) + 1
+    new = [n for n in loops if n not in before or loops.count(n) > before.count(n)][0]
+    outer = max(loops)
 
     result = fill_holes(tmp_path / "punched.ply", tmp_path / "filled.ply")
-    assert result["loops"] == 2 and result["skipped_outer"] == 1 and result["filled"] == 1
-    assert result["filled_faces"] == loops[0] - 2  # the loop's own vertices, triangulated
+    assert result["loops"] == len(loops) and result["filled"] >= 1
+    assert result["filled_faces"] >= new - 2  # the loop's own vertices, triangulated
     filled = trimesh.load(tmp_path / "filled.ply", process=False, force="mesh")
     assert len(filled.faces) == len(punched.faces) + result["filled_faces"]
-    assert [len(loop) for loop in boundary_loops(filled)] == [outer]
+    assert outer in [len(loop) for loop in boundary_loops(filled)]
+    assert len(boundary_loops(filled)) == len(loops) - result["filled"]
 
 
 def test_planes(report, mesh_post_run, tmp_path):

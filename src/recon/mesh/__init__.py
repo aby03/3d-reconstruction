@@ -5,6 +5,7 @@ from recon.mesh.cleanup import CleanupOptions
 from recon.mesh.decimate import DecimateOptions
 from recon.mesh.holes import HoleOptions
 from recon.mesh.planes import PlaneOptions
+from recon.mesh.roi import RoiOptions
 from recon.mesh.texture_fix import TextureFixOptions
 from recon.mesh.texturing import TextureOptions
 
@@ -12,6 +13,7 @@ from recon.mesh.texturing import TextureOptions
 @dataclass(slots=True)
 class MeshPostOptions:
     input: Literal["refined", "raw"] = "refined"
+    roi: RoiOptions = field(default_factory=RoiOptions)
     cleanup: CleanupOptions = field(default_factory=CleanupOptions)
     holes: HoleOptions = field(default_factory=HoleOptions)
     planes: PlaneOptions = field(default_factory=PlaneOptions)

@@ -20,6 +20,7 @@ from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
 from recon.mesh.holes import fill_holes
 from recon.mesh.planes import regularize, write_planes
+from recon.mesh.roi import room_bounds
 from recon.mesh.texture_fix import fix_textures
 from recon.mesh.qa import dense_to_mesh, tau, unsupported_area_frac
 from recon.mesh.texturing import atlas_stats, texture_mesh
@@ -93,7 +94,11 @@ def run_mesh_post(
     timings["load"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    cleaned = cleanup(src, out / ARTIFACTS["mesh_clean"], options.cleanup)
+    bounds = None
+    if options.roi.enabled:
+        points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
+        bounds = room_bounds(points, dense["diag"], options.roi)
+    cleaned = cleanup(src, out / ARTIFACTS["mesh_clean"], options.cleanup, bounds)
     timings["cleanup"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -193,6 +198,7 @@ def run_mesh_post(
         "input_faces": cleaned.before["faces"],
         "units": dense["units"],
         "diag": dense["diag"],
+        "roi": {"min": bounds[0].tolist(), "max": bounds[1].tolist()} if bounds else None,
         "cleanup": dataclasses.asdict(cleaned),
         "holes": holes,
         "planes": planes_report,

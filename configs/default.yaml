@@ -159,6 +159,11 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
 
 mesh_post:                       # step 6: clean, fill small holes, flatten planes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
   input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)
+  roi:                           # crop to the span where the dense points are dense (room2: drops the stray +y trail)
+    enabled: true
+    bin_frac: 0.005
+    min_density_frac: 0.15
+    margin_frac: 0.01
   cleanup:
     min_component_frac: 0.005    # drop components with fewer faces than this fraction (room2: 17 -> 1 components)
     min_component_diam_frac: 0.02  # ... or smaller than this fraction of the bbox diagonal
