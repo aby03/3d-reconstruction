@@ -55,11 +55,11 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage (now: ingest, keyframes, sfm, align, dense)
+pixi run recon run --input data/room2_tiny                     # every stage: ingest ... dense, mesh_post
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense, mesh_post and later), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
 ```bash
 pixi run recon run --input data/room2_tiny --resume                    # the latest run
 pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
@@ -79,11 +79,11 @@ pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given
 | `--set KEY=VALUE` | override one key, value parsed as YAML (repeatable), e.g. `--set ingest.gravity_method=lowpass` |
 | `--gravity-method`, `--time-offset-ns`, `--no-verify-refs` | shortcuts for `ingest.gravity_method`, `ingest.camera_time_offset_ns`, `loader.verify_reference_jpegs=false` |
 
-**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`, `dense`). Unknown keys and wrong types are errors that name the full key path. Layers, later wins: `default.yaml`, the hardware preset, `--config` files, `--set`.
+**Config.** `configs/default.yaml` lists every key with its default: `run`, `device` and one section per step (`loader`, `ingest`, `keyframes`, `sfm`, `align`, `dense`, `mesh_post`). Unknown keys and wrong types are errors that name the full key path. Layers, later wins: `default.yaml`, the hardware preset, `--config` files, `--set`.
 
 **Hardware presets.** `configs/hardware/cuda_6gb.yaml` (4–10 GB of GPU memory: the defaults written out), `cuda_large.yaml` (10 GB or more: full-resolution depth maps, 8 neighbour views) and `cpu.yaml` (no CUDA OpenMVS, or `device.preference: cpu`: everything on the CPU, depth maps at a quarter of the image size). `--hardware auto` (the default) picks one by the probed GPU, `--hardware cpu` forces a preset, `--hardware none` skips the layer. The preset is named in the first line of the run's `config.resolved.yaml` and under `hardware` in `run_manifest.json`.
 
-**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) and the OpenMVS tools of the dense step follow `device.preference`. Each stage manifest records the backends it used under `backends`.
+**GPU.** `device.preference: auto` (default) runs an operation on CUDA where this machine supports it and falls back to the CPU with a warning; `cuda` makes a missing CUDA path an error, `cpu` forces the CPU (`--set device.preference=cpu`). Per operation: `loader.decode_backend` (`nvdec`/`pyav`) and `keyframes.metrics_backend` (`torch`/`numpy`); SfM (features, matching, mapping) and the OpenMVS tools of the dense and mesh_post steps follow `device.preference`. Each stage manifest records the backends it used under `backends`.
 
 ### Check the machine
 ```bash
@@ -182,6 +182,27 @@ ls $D/reports/plots/        # dense_height_hist (floor spike at z = 0, walls up 
 ls $D/../logs/dense/
 ```
 Writes `dense_points.ply` (the fused cloud as a plain binary PLY: `x y z nx ny nz red green blue`), `mesh_raw.ply` (the ReconstructMesh surface), `mesh_refined.ply` (the refined surface, decimated by RefineMesh to about a third of the faces; the mesh later steps start from), `preview/mesh.obj` (+ `mesh.mtl` and one texture atlas jpg; the unused atlas space is orange), `undistorted/` (images, `sparse/` PINHOLE model, `stereo/`; the texturing input of later steps), `openmvs/` (`scene.mvs`, `scene_dense.mvs` with the `scene_dense.ply` it references, `scene_dense_mesh.ply`) and the report. In the report, `num_dense_points`, `dense.inside_sparse_bbox_frac` and `mesh_raw.inside_sparse_bbox_frac` (share of the vertices inside the box of the aligned sparse points and cameras; ≥ 0.99 expected, a warning below), `mesh_raw.largest_component_frac` (share of the faces in the largest connected piece; > 0.9 expected), the same for the refined mesh under `refine` (with `ran`, `timed_out`), `preview` (faces, atlas size), `dense.floor_band_frac` / `floor_band_median_z` (points within 1% of the scene diagonal of z = 0), `densify.effective_long_side`, and per tool its time, peak GPU memory (`peak_vram_mb`, sampled with `nvidia-smi`, GPU-wide) and log. Open `dense_points.ply`, `mesh_raw.ply`, `mesh_refined.ply` and `preview/mesh.obj` in MeshLab (Z up; `openmvs/scene_dense.ply` also loads there, but trimesh can't read its per-point view lists).
+
+### Step 6: mesh_post
+Needs a finished dense step (`recon dense` first, or use `recon run`).
+```bash
+pixi run recon mesh_post --input data/room2_tiny
+pixi run recon mesh_post --input data/room2_tiny --force --hardware cpu   # texturing on the CPU
+```
+Same as `recon run --only mesh_post --resume`: it continues in the latest run (`--resume RUN_ID` picks another, `--force` re-runs it). It starts from `05_dense/mesh_refined.ply` (`mesh_post.input: raw` takes `mesh_raw.ply`) and, in the world frame W:
+1. **Cleanup** with pymeshlab → `mesh_clean.ply`: duplicate vertices and faces, zero-area faces and unreferenced vertices removed, non-manifold edges and vertices repaired, then every connected piece with fewer than `cleanup.min_component_frac` (0.5%) of the faces or smaller than `cleanup.min_component_diam_frac` (2%) of the bounding-box diagonal dropped (tiny: 3 → 1 pieces, 32 faces removed).
+2. **Decimation** → `mesh_final_geometry.ply`: quadric edge collapse down to `decimate.texture_face_budget` (600k) faces, only when the mesh has more (room2: 728k → 600k; tiny's 101k is copied unchanged).
+3. **Texturing** with OpenMVS `TextureMesh` → `textured/mesh.obj` + `mesh.mtl` + `mesh_material_NN_map_Kd.jpg` (one JPEG atlas per 8192² of texture; tiny: one 4096² atlas, room2: one 8192²). It runs in `05_dense/openmvs/` on the full-resolution undistorted keyframes (`texture.resolution_level: 0`), on CUDA like the dense tools (CPU with `device.preference: cpu`, and as a fallback after a GPU out-of-memory error under `auto`). Seam leveling is always off (it turns large parts of the atlas black in OpenMVS 2.4.0), and holes are not closed, so the textured mesh has exactly the faces of `mesh_final_geometry.ply`. Atlas space no view covers is magenta (`0xFF00FF`).
+
+Keys: `mesh_post.input`, `mesh_post.cleanup.{min_component_frac, min_component_diam_frac}`, `mesh_post.decimate.{texture_face_budget, planar_quadric}`, `mesh_post.texture.{resolution_level, min_resolution, max_texture_size, outlier_threshold, cost_smoothness_ratio, virtual_face_images, sharpness_weight, patch_packing_heuristic}`. Tool logs go to `outputs/<scene>/runs/<run_id>/logs/mesh_post/`.
+
+Results to look at:
+```bash
+D=$(ls -d outputs/room2_tiny/runs/*/06_mesh_post | tail -1)
+cat $D/stage_manifest.json $D/reports/mesh_report.json
+ls $D/textured/
+```
+In `mesh_report.json`: `cleanup.before`/`after` (vertices, faces, connected pieces, boundary and non-manifold edges), `decimate` (faces in/out, budget), `final` (the texturing input: pieces, share inside the sparse bounding box, ≥ 0.99 expected), `texture` (`atlas_count`, `atlas_size`, `atlas_empty_frac`: magenta share of the atlas, `black_texel_frac`: near-black share of the used texels, `untextured_face_frac`: faces whose texture is magenta, a warning above 1%; tiny 0.9%, room2 1.0%), time and GPU memory per tool. Open `textured/mesh.obj` in MeshLab (Z up): walls and floor carry the photos, magenta marks faces no keyframe saw. OpenMVS's MTL says `Tr 1.000000`, which some viewers read as fully transparent.
 
 ### Tests
 ```bash

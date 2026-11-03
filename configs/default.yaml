@@ -156,3 +156,21 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     enabled: true
     resolution_level: 2
     min_resolution: 320
+
+mesh_post:                       # step 6: clean + decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
+  input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)
+  cleanup:
+    min_component_frac: 0.005    # drop components with fewer faces than this fraction (room2: 17 -> 1 components)
+    min_component_diam_frac: 0.02  # ... or smaller than this fraction of the bbox diagonal
+  decimate:
+    texture_face_budget: 600000  # quadric decimation above this many faces (room2 refined: 728k -> 600k, 3.5 s)
+    planar_quadric: true
+  texture:                       # TextureMesh; seam leveling always off (2.4.0 bug: 41% black texels on tiny)
+    resolution_level: 0          # full-resolution keyframes (tiny: 9 s, one 4096^2 atlas; level 1: 8 s, 2048^2)
+    min_resolution: 640
+    max_texture_size: 8192       # larger atlases are split into several textures
+    outlier_threshold: 0.06
+    cost_smoothness_ratio: 0.1
+    virtual_face_images: 0
+    sharpness_weight: 0.5
+    patch_packing_heuristic: 3

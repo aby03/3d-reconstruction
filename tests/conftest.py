@@ -64,3 +64,14 @@ def dense_run(pipeline_run, align_run) -> Path:
     result = run_stages(pipeline_run, [DenseStage])
     assert result.status == "success", result.error
     return pipeline_run.stage_dir("dense")
+
+
+@pytest.fixture(scope="session")
+def mesh_post_run(pipeline_run, dense_run) -> Path:
+    """mesh_post on the mesh of `dense_run` with the default config, once per session; returns its stage dir."""
+    from recon.pipeline.stages.s06_mesh_post import MeshPostStage
+
+    result = run_stages(pipeline_run, [MeshPostStage])
+    assert result.status == "success", result.error
+    return pipeline_run.stage_dir("mesh_post")
+

@@ -17,6 +17,7 @@ from recon.capture.open_camera_sensors import LoaderOptions
 from recon.dense import DenseOptions
 from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
+from recon.mesh import MeshPostOptions
 from recon.pipeline.device import DeviceInfo, DeviceOptions, Preference, probe_device
 from recon.sensors.sync import SyncOptions
 from recon.sfm import SfmOptions
@@ -47,6 +48,7 @@ class PipelineConfig:
     sfm: SfmOptions = field(default_factory=SfmOptions)
     align: AlignOptions = field(default_factory=AlignOptions)
     dense: DenseOptions = field(default_factory=DenseOptions)
+    mesh_post: MeshPostOptions = field(default_factory=MeshPostOptions)
 
 
 SECTIONS: dict[str, type] = {f.name: f.type for f in dataclasses.fields(PipelineConfig)}

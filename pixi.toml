@@ -24,6 +24,8 @@ tqdm = ">=4.70,<5"
 trimesh = ">=5,<6"
 pytest = ">=9,<10"
 av = ">=18,<19"
+pymeshlab = ">=2025.7,<2026"
+libopengl = "*"
 
 [pypi-dependencies]
 recon = { path = ".", editable = true }

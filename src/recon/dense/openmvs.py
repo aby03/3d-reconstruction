@@ -260,7 +260,8 @@ def _cpu_attempt(args_for: Callable[[int], list[str]], tool: str, level: int | N
     return _Attempt(args_for(CPU_DEVICE), CPU_DEVICE, OomRetry(tool, level, level, cpu_fallback=True))
 
 
-def _check_output(tool: str, path: Path) -> Path:
+def check_output(tool: str, path: Path) -> Path:
+    """`path`, after checking that `tool` wrote it."""
     if not path.is_file():
         raise RuntimeError(f"{tool} finished but wrote no {path.name}")
     return path
@@ -271,7 +272,7 @@ def import_colmap(runner: ToolRunner, work_dir: Path, undistorted_dir: Path) -> 
     work_dir.mkdir(parents=True, exist_ok=True)
     rel = Path(os.path.relpath(undistorted_dir, work_dir))
     result = runner.run(INTERFACE_COLMAP, interface_colmap_args(str(rel), str(rel / "images")), work_dir)
-    _check_output(INTERFACE_COLMAP, work_dir / SCENE)
+    check_output(INTERFACE_COLMAP, work_dir / SCENE)
     return result
 
 
@@ -308,27 +309,28 @@ def densify(
     used, results, retries = _run_attempts(runner, DENSIFY, attempts, work_dir, before_retry=clear_dmaps)
     if used.retry is not None:
         side, level = retry_side, retry_level
-    _check_output(DENSIFY, work_dir / SCENE_DENSE)
+    check_output(DENSIFY, work_dir / SCENE_DENSE)
     num_points = parse_count(results[-1].log_path.read_text(errors="replace"), DENSE_POINTS_PATTERN)
-    ply = _check_output(DENSIFY, work_dir / DENSE_PLY)
+    ply = check_output(DENSIFY, work_dir / DENSE_PLY)
     return DensifyResult(ply, num_points, level, side, used.device, retries, results)
 
 
-def _cuda_or_cpu(
+def run_with_cpu_fallback(
     runner: ToolRunner,
     tool: str,
-    args_for: Callable[[int], list[str]],
+    argv_for_device: Callable[[int], list[str]],
     work_dir: Path,
     device: int,
     cpu_fallback: bool,
     level: int | None = None,
     timeout_s: float | None = None,
 ) -> tuple[int, list[ToolResult], list[OomRetry]]:
-    """Run a tool on `device`; on a CUDA OOM, once more on the CPU when `cpu_fallback` (no lower resolution: these
-    tools need little memory, so an OOM means the GPU is taken)."""
-    attempts = [_Attempt(args_for(device), device)]
+    """Run a tool on `device` (argv from `argv_for_device(device)`); on a CUDA OOM, once more on the CPU when
+    `cpu_fallback` (no lower resolution: these tools need little memory, so an OOM means the GPU is taken).
+    Returns the device that succeeded, the tool results and the retries."""
+    attempts = [_Attempt(argv_for_device(device), device)]
     if device != CPU_DEVICE and cpu_fallback:
-        attempts.append(_cpu_attempt(args_for, tool, level))
+        attempts.append(_cpu_attempt(argv_for_device, tool, level))
     used, results, retries = _run_attempts(runner, tool, attempts, work_dir, timeout_s)
     return used.device, results, retries
 
@@ -342,11 +344,11 @@ def reconstruct_mesh(
     cpu_fallback: bool = False,
 ) -> MeshResult:
     """Delaunay + graph-cut mesh of the dense cloud into `work_dir/scene_dense_mesh.ply`."""
-    used, results, retries = _cuda_or_cpu(
+    used, results, retries = run_with_cpu_fallback(
         runner, RECONSTRUCT_MESH, lambda d: reconstruct_mesh_args(options, d, crop_to_roi), work_dir, device,
         cpu_fallback,
     )
-    return MeshResult(_check_output(RECONSTRUCT_MESH, work_dir / MESH_PLY), used, False, retries, results)
+    return MeshResult(check_output(RECONSTRUCT_MESH, work_dir / MESH_PLY), used, False, retries, results)
 
 
 def refine_mesh(
@@ -355,14 +357,14 @@ def refine_mesh(
     """Photometric refinement of `work_dir/scene_dense_mesh.ply` into `work_dir/scene_dense_mesh_refine.ply`.
     Stopped after `options.max_minutes`: the result then has `ply=None, timed_out=True`."""
     try:
-        used, results, retries = _cuda_or_cpu(
+        used, results, retries = run_with_cpu_fallback(
             runner, REFINE_MESH, lambda d: refine_mesh_args(options, d), work_dir, device, cpu_fallback,
             options.resolution_level, options.max_minutes * 60,
         )
     except ToolTimeout:
         log.warning("%s stopped after %.0f min", REFINE_MESH, options.max_minutes)
         return MeshResult(None, device, True, [], [runner.results[-1]])
-    return MeshResult(_check_output(REFINE_MESH, work_dir / REFINED_PLY), used, False, retries, results)
+    return MeshResult(check_output(REFINE_MESH, work_dir / REFINED_PLY), used, False, retries, results)
 
 
 def texture_preview(
@@ -377,8 +379,8 @@ def texture_preview(
     """Low-resolution textured `out_dir/mesh.obj` (+ `.mtl` and the atlas) of `mesh` (a file in `work_dir`)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     out_rel = os.path.relpath(out_dir, work_dir)
-    used, results, retries = _cuda_or_cpu(
+    used, results, retries = run_with_cpu_fallback(
         runner, TEXTURE_MESH, lambda d: texture_mesh_args(options, d, mesh, out_rel), work_dir, device,
         cpu_fallback, options.resolution_level,
     )
-    return MeshResult(_check_output(TEXTURE_MESH, out_dir / PREVIEW_OBJ), used, False, retries, results)
+    return MeshResult(check_output(TEXTURE_MESH, out_dir / PREVIEW_OBJ), used, False, retries, results)

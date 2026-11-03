@@ -72,7 +72,7 @@ OPTIONAL_ARTIFACTS = {
 PREVIEW_DIR = "preview"
 
 
-def _inside_frac(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray]) -> float:
+def inside_frac(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray]) -> float:
     """Share of `xyz` inside the axis-aligned box (lo, hi), bounds included."""
     lo, hi = box
     return float(((xyz >= lo) & (xyz <= hi)).all(axis=1).mean()) if len(xyz) else 0.0
@@ -87,14 +87,14 @@ def _cloud_stats(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray], diag: floa
     p1, p99 = np.percentile(xyz, [1, 99], axis=0) if len(xyz) else (np.zeros(3), np.zeros(3))
     return {
         "bbox": {"p1": p1.tolist(), "p99": p99.tolist()},
-        "inside_sparse_bbox_frac": _inside_frac(xyz, box),
+        "inside_sparse_bbox_frac": inside_frac(xyz, box),
         "floor_band_frac": float(len(floor) / len(xyz)) if len(xyz) else 0.0,
         "floor_band_median_z": float(np.median(floor)) if len(floor) else None,
     }
 
 
 def _mesh_report(mesh, box: tuple[np.ndarray, np.ndarray]) -> dict[str, Any]:
-    return {**mesh_stats(mesh), "inside_sparse_bbox_frac": _inside_frac(np.asarray(mesh.vertices), box)}
+    return {**mesh_stats(mesh), "inside_sparse_bbox_frac": inside_frac(np.asarray(mesh.vertices), box)}
 
 
 def _preview_report(obj: Path) -> dict[str, Any]:
@@ -108,7 +108,7 @@ def _preview_report(obj: Path) -> dict[str, Any]:
     return {"faces": faces, "texture_coords": uvs, "textures": len(atlases), "atlas_size": size}
 
 
-def _tool_rows(runner: ToolRunner, out: Path) -> dict[str, dict[str, Any]]:
+def tool_rows(runner: ToolRunner, out: Path) -> dict[str, dict[str, Any]]:
     """One row per tool; a retried tool sums its durations and keeps the worst VRAM peak and the last status."""
     rows: dict[str, dict[str, Any]] = {}
     for r in runner.results:
@@ -122,7 +122,7 @@ def _tool_rows(runner: ToolRunner, out: Path) -> dict[str, dict[str, Any]]:
     return rows
 
 
-def _retry_warning(retry: OomRetry) -> str:
+def retry_warning(retry: OomRetry) -> str:
     if retry.cpu_fallback:
         return f"oom_cpu_fallback: {retry.tool}"
     return f"oom_retry: {retry.tool} at level {retry.from_level} -> {retry.to_level}"
@@ -230,7 +230,7 @@ def run_dense(
     if dense.num_points != len(xyz):
         warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {len(xyz)}")
     retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
-    warnings += [_retry_warning(r) for r in retries]
+    warnings += [retry_warning(r) for r in retries]
     meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
     for name, stats in [("dense cloud", dense_stats), *meshes]:
         frac = stats["inside_sparse_bbox_frac"]
@@ -245,7 +245,7 @@ def run_dense(
     for warning in warnings:
         log.warning(warning)
 
-    tools = _tool_rows(runner, out)
+    tools = tool_rows(runner, out)
     vram = [r.peak_vram_mb for r in runner.results if r.peak_vram_mb is not None]
     openmvs_version = runner.version(DENSIFY)
     o = options.openmvs
