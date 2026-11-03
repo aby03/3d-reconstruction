@@ -38,7 +38,7 @@ def mesh_report(mesh_post_run):
 @pytest.fixture(scope="module")
 def source(mesh_post_run):
     """The textured OBJ the export starts from, in W."""
-    return trimesh.load(mesh_post_run / MESH_ARTIFACTS["textured_obj"], force="scene", process=False)
+    return trimesh.load(mesh_post_run / MESH_ARTIFACTS["textured_fixed_obj"], force="scene", process=False)
 
 
 def test_manifest(export_run):
@@ -73,8 +73,8 @@ def test_glb(export_run, mesh_report, source, mesh_post_run):
         assert material["doubleSided"] is True and material["alphaMode"] == "OPAQUE"
         assert "baseColorTexture" in pbr and pbr["metallicFactor"] == 0 and pbr["roughnessFactor"] == 1
     # the atlases are embedded byte for byte
-    maps = read_mtl_maps(mesh_post_run / MESH_ARTIFACTS["textured_mtl"])
-    atlases = {(mesh_post_run / MESH_ARTIFACTS["textured"] / name).read_bytes() for name in maps.values()}
+    maps = read_mtl_maps(mesh_post_run / MESH_ARTIFACTS["textured_fixed_mtl"])
+    atlases = {(mesh_post_run / MESH_ARTIFACTS["textured_fixed"] / name).read_bytes() for name in maps.values()}
     views = [tree["bufferViews"][i["bufferView"]] for i in tree["images"]]
     assert {binary[v["byteOffset"] : v["byteOffset"] + v["byteLength"]] for v in views} == atlases
 

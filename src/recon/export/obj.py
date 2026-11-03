@@ -8,7 +8,7 @@ import numpy as np
 import trimesh
 from PIL import Image
 
-from recon.mesh.texturing import TEXTURED_OBJ, read_mtl_maps
+from recon.mesh.texturing import TEXTURED_OBJ, opaque_mtl, read_mtl_maps
 
 OBJ_NAME = "model.obj"
 MTL_NAME = "model.mtl"
@@ -26,22 +26,6 @@ def read_mtllib(obj: Path) -> str:
     raise ValueError(f"{obj.name} has no mtllib")
 
 
-def _opaque_mtl(text: str, textures: dict[str, str]) -> str:
-    """The MTL with `map_Kd` pointing at the renamed textures and every material opaque: OpenMVS writes `Tr 1`,
-    which some readers take as fully transparent, so `Tr`/`d` are replaced by `Tr 0` and `d 1`."""
-    lines = []
-    for line in text.splitlines():
-        words = line.split(maxsplit=1)
-        if words[:1] in (["Tr"], ["d"]):
-            continue
-        if words[:1] == ["map_Kd"]:
-            line = f"map_Kd {textures[words[1].strip()]}"
-        lines.append(line)
-        if words[:1] == ["newmtl"]:
-            lines += ["Tr 0.000000", "d 1.0"]
-    return "\n".join(lines) + "\n"
-
-
 def write_obj(textured_dir: Path, out_dir: Path, units: str) -> dict[str, Any]:
     """Copy OpenMVS's textured mesh in `textured_dir` to `out_dir/model.obj`, `model.mtl` and
     `textures/model_NN.<ext>`, with an opaque MTL and a header comment naming the frame and units. Returns
@@ -55,7 +39,7 @@ def write_obj(textured_dir: Path, out_dir: Path, units: str) -> dict[str, Any]:
     (out_dir / TEXTURE_DIR).mkdir(parents=True, exist_ok=True)
     for name, rel in textures.items():
         shutil.copyfile(textured_dir / name, out_dir / rel)
-    (out_dir / MTL_NAME).write_text(_opaque_mtl(mtl.read_text(), textures))
+    (out_dir / MTL_NAME).write_text(opaque_mtl(mtl.read_text(), textures))
     with src.open() as f_in, (out_dir / OBJ_NAME).open("w") as f_out:
         f_out.write(f"# world W: +Z up, units {units}\n")
         for line in f_in:

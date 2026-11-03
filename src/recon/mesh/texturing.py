@@ -90,6 +90,22 @@ def read_mtl_maps(mtl: Path) -> dict[str, str]:
     return maps
 
 
+def opaque_mtl(text: str, textures: dict[str, str] | None = None) -> str:
+    """The MTL with every material opaque (OpenMVS writes `Tr 1`, which some readers take as fully transparent, so
+    `Tr`/`d` are replaced by `Tr 0` and `d 1`) and `map_Kd` renamed per `textures` (old -> new name)."""
+    lines = []
+    for line in text.splitlines():
+        words = line.split(maxsplit=1)
+        if words[:1] in (["Tr"], ["d"]):
+            continue
+        if words[:1] == ["map_Kd"] and textures:
+            line = f"map_Kd {textures[words[1].strip()]}"
+        lines.append(line)
+        if words[:1] == ["newmtl"]:
+            lines += ["Tr 0.000000", "d 1.0"]
+    return "\n".join(lines) + "\n"
+
+
 def read_obj_uv(obj: Path) -> tuple[str | None, np.ndarray, dict[str, np.ndarray], int]:
     """`mtllib` name, texture coordinates (T, 2), per material the faces' texture-coordinate indices (F, 3; -1
     where a face has none) and the face count of a triangle OBJ."""

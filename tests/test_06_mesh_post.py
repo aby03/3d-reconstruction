@@ -10,7 +10,7 @@ from recon.io.tables import read_json
 from recon.mesh.decimate import DecimateOptions, decimate
 from recon.mesh.holes import boundary_loops, fill_holes
 from recon.mesh.planes import PlaneOptions, regularize
-from recon.mesh.texturing import read_mtl_maps, read_obj_uv
+from recon.mesh.texturing import _is_sentinel, read_mtl_maps, read_obj_uv
 from recon.pipeline.cli import main
 from recon.pipeline.config import PipelineConfig, load_config
 from recon.pipeline.device import probe_device
@@ -18,9 +18,9 @@ from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s05_dense import ARTIFACTS as DENSE_ARTIFACTS
 from recon.pipeline.stages.s06_mesh_post import ARTIFACTS
 
-# warnings that depend on OpenMVS's run-to-run variance on tiny: CUDA view selection leaves 0 or ~2.7% of the
-# faces untextured, and the oblique -Y wall ends at 0.15-0.28% of the diagonal depending on the dense mesh
-VARIABLE_WARNINGS = ("faces untextured (> 1%)", "of diag after snapping (>= 0.2%)")
+# a warning that depends on OpenMVS's run-to-run variance on tiny: the oblique -Y wall ends at 0.15-0.28% of the
+# diagonal depending on the dense mesh
+VARIABLE_WARNINGS = ("of diag after snapping (>= 0.2%)",)
 
 REPORT_KEYS = {
     "input",
@@ -33,6 +33,7 @@ REPORT_KEYS = {
     "decimate",
     "final",
     "texture",
+    "texture_fix",
     "qa",
     "oom_retries",
     "tools",
@@ -65,7 +66,7 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    assert set(report["timings"]) == {"load", "cleanup", "holes", "planes", "decimate", "texture", "stats", "qa"}
+    assert set(report["timings"]) == {"load", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
 
 
@@ -174,6 +175,37 @@ def test_texture(report, mesh_post_run):
     assert texture["atlas_size"] in sizes and max(w * h for w, h in sizes) == np.prod(texture["atlas_size"])
     assert uv.min() >= 0 and uv.max() <= 1
     assert all((idx >= 0).all() for idx in per_material.values())
+
+
+def test_texture_fix(report, mesh_post_run):
+    fix, raw = report["texture_fix"], report["texture"]
+    raw_untextured = round(raw["untextured_face_frac"] * raw["faces"])
+    assert fix["sentinel_in_faces"] == 0 and fix["unfilled_faces"] == 0
+    assert fix["filled_faces"] == raw_untextured  # CUDA: 0 or ~2.7% of the faces, each gets a colour cell
+    assert fix["atlas"]["untextured_face_frac"] == 0.0 and fix["atlas"]["faces"] == raw["faces"]
+    assert fix["atlas"]["atlas_count"] == raw["atlas_count"] and fix["atlas"]["atlas_size"] == raw["atlas_size"]
+    assert fix["atlas"]["black_texel_frac"] < 0.1
+    manifest = read_manifest(mesh_post_run)
+    assert manifest.metrics["untextured_face_frac"] == 0.0
+    assert manifest.metrics["untextured_face_frac_raw"] == raw["untextured_face_frac"]
+
+    _, uv_raw, faces_raw, _ = read_obj_uv(mesh_post_run / ARTIFACTS["textured_obj"])
+    _, uv_fixed, faces_fixed, _ = read_obj_uv(mesh_post_run / ARTIFACTS["textured_fixed_obj"])
+    raw_mesh = trimesh.load(mesh_post_run / ARTIFACTS["textured_obj"], process=False, force="mesh")
+    fixed_mesh = trimesh.load(mesh_post_run / ARTIFACTS["textured_fixed_obj"], process=False, force="mesh")
+    assert np.array_equal(raw_mesh.vertices, fixed_mesh.vertices) and len(fixed_mesh.faces) == len(raw_mesh.faces)
+    changed = 0
+    for name, idx in faces_raw.items():
+        same = np.isclose(uv_raw[idx], uv_fixed[faces_fixed[name]], atol=1e-6).all(axis=(1, 2))
+        changed += int((~same).sum())
+    assert changed == fix["filled_faces"]  # only the faces that got a colour cell point elsewhere
+
+    mtl = (mesh_post_run / ARTIFACTS["textured_fixed_mtl"]).read_text()
+    assert "Tr 0.000000" in mtl and "d 1.0" in mtl and "Tr 1" not in mtl
+    for name in read_mtl_maps(mesh_post_run / ARTIFACTS["textured_fixed_mtl"]).values():
+        raw_image = cv2.imread(str(mesh_post_run / ARTIFACTS["textured"] / name))
+        image = cv2.imread(str(mesh_post_run / ARTIFACTS["textured_fixed"] / name))
+        assert image.shape == raw_image.shape and not _is_sentinel(image).any()  # no magenta anywhere
 
 
 def test_world_frame(report, dense_run, mesh_post_run):

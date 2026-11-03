@@ -5,6 +5,7 @@ from recon.mesh.cleanup import CleanupOptions
 from recon.mesh.decimate import DecimateOptions
 from recon.mesh.holes import HoleOptions
 from recon.mesh.planes import PlaneOptions
+from recon.mesh.texture_fix import TextureFixOptions
 from recon.mesh.texturing import TextureOptions
 
 
@@ -16,3 +17,4 @@ class MeshPostOptions:
     planes: PlaneOptions = field(default_factory=PlaneOptions)
     decimate: DecimateOptions = field(default_factory=DecimateOptions)
     texture: TextureOptions = field(default_factory=TextureOptions)
+    texture_fix: TextureFixOptions = field(default_factory=TextureFixOptions)

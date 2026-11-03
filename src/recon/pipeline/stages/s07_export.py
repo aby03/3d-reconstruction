@@ -76,13 +76,13 @@ def run_export(
 
     t0 = time.perf_counter()
     glb = out / ARTIFACTS["glb"]
-    write_glb(mesh_post_dir / s06_mesh_post.ARTIFACTS["textured_obj"], glb, options.glb)
+    write_glb(mesh_post_dir / s06_mesh_post.ARTIFACTS["textured_fixed_obj"], glb, options.glb)
     glb_info = validate_glb(glb, faces, bounds_w, diag)
     timings["glb"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     obj = out / ARTIFACTS["obj"]
-    write_obj(mesh_post_dir / s06_mesh_post.ARTIFACTS["textured"], obj.parent, units)
+    write_obj(mesh_post_dir / s06_mesh_post.ARTIFACTS["textured_fixed"], obj.parent, units)
     obj_info = validate_obj(obj, faces, bounds_w, diag)
     timings["obj"] = time.perf_counter() - t0
 

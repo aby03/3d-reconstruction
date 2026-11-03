@@ -187,6 +187,11 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     virtual_face_images: 0
     sharpness_weight: 0.5
     patch_packing_heuristic: 3
+  texture_fix:                   # textured_fixed/: untextured faces coloured from the dense points, gutters, opaque MTL
+    fill_untextured: true
+    gutter_px: 8
+    jpeg_quality: 95             # PNG would be 4.3x the bytes (tiny 6.9 vs 1.6 MB)
+    fill_k: 8                    # dense points averaged per face
 
 export:                          # step 7: model.glb (Y up, textures embedded) + obj/ (Z up) + metadata.json
   glb:

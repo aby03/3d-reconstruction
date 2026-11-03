@@ -1,5 +1,5 @@
 """Step 6: clean the dense mesh, close its small holes, flatten its walls, floor and ceiling and decimate it,
-texture it at full resolution with OpenMVS, in world W, in
+texture it at full resolution with OpenMVS and fix the atlases, in world W, in
 `06_mesh_post/`, and check the final geometry against the dense points."""
 
 import dataclasses
@@ -20,6 +20,7 @@ from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
 from recon.mesh.holes import fill_holes
 from recon.mesh.planes import regularize, write_planes
+from recon.mesh.texture_fix import fix_textures
 from recon.mesh.qa import dense_to_mesh, tau, unsupported_area_frac
 from recon.mesh.texturing import atlas_stats, texture_mesh
 from recon.pipeline.device import Backend
@@ -45,6 +46,9 @@ ARTIFACTS = {
     "textured": "textured",
     "textured_obj": "textured/mesh.obj",
     "textured_mtl": "textured/mesh.mtl",
+    "textured_fixed": "textured_fixed",
+    "textured_fixed_obj": "textured_fixed/mesh.obj",
+    "textured_fixed_mtl": "textured_fixed/mesh.mtl",
     "report": "reports/mesh_report.json",
 }
 INPUTS = {"refined": "mesh_refined", "raw": "mesh_raw"}
@@ -127,7 +131,17 @@ def run_mesh_post(
     timings["texture"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    fixed = fix_textures(
+        out / ARTIFACTS["textured"],
+        out / ARTIFACTS["textured_fixed"],
+        dense_dir / s05_dense.ARTIFACTS["dense_points"],
+        options.texture_fix,
+    )
+    timings["texture_fix"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     atlas = atlas_stats(textured.ply)
+    fixed["atlas"] = atlas_stats(out / ARTIFACTS["textured_fixed_obj"])
     final = _final_report(out / ARTIFACTS["mesh_final_geometry"], box)
     timings["stats"] = time.perf_counter() - t0
 
@@ -135,10 +149,11 @@ def run_mesh_post(
     qa = _qa(dense_dir, out / ARTIFACTS["mesh_final_geometry"], t, dense["diag"])
     timings["qa"] = time.perf_counter() - t0
 
-    if atlas["untextured_face_frac"] is not None and atlas["untextured_face_frac"] > MAX_UNTEXTURED_FRAC:
-        warnings.append(
-            f"{atlas['untextured_face_frac']:.1%} of the faces untextured (> {MAX_UNTEXTURED_FRAC:.0%})"
-        )
+    untextured = fixed["atlas"]["untextured_face_frac"]
+    if untextured is not None and untextured > MAX_UNTEXTURED_FRAC:
+        warnings.append(f"{untextured:.1%} of the faces untextured (> {MAX_UNTEXTURED_FRAC:.0%})")
+    if fixed["sentinel_in_faces"]:
+        warnings.append(f"texture fix: {fixed['sentinel_in_faces']} empty texels left inside faces")
     if final["largest_component_frac"] < s05_dense.MIN_LARGEST_COMPONENT_FRAC:
         warnings.append(
             f"final mesh: largest component has {final['largest_component_frac']:.1%} of the faces"
@@ -188,6 +203,7 @@ def run_mesh_post(
             "cuda_device": textured.cuda_device,
             **atlas,
         },
+        "texture_fix": fixed,
         "qa": qa,
         "oom_retries": [dataclasses.asdict(r) for r in textured.oom_retries],
         "tools": tool_rows(runner, out),
@@ -197,7 +213,7 @@ def run_mesh_post(
     write_json(report, out / ARTIFACTS["report"])
     log.info(
         "mesh %d -> %d faces (cleanup %.1f s, %d hole(s) closed, %d planes, decimate %.1f s); textured in %.1f s"
-        " on %s: %d atlas(es) %s, %.2f%% faces untextured; dense -> mesh p95 %.2f%% of diag",
+        " on %s: %d atlas(es) %s, %.2f%% faces untextured (%d filled); dense -> mesh p95 %.2f%% of diag",
         cleaned.before["faces"],
         final["faces"],
         timings["cleanup"],
@@ -209,13 +225,15 @@ def run_mesh_post(
         atlas["atlas_count"],
         atlas["atlas_size"],
         100 * (atlas["untextured_face_frac"] or 0.0),
+        fixed["filled_faces"],
         100 * qa["p95_frac"],
     )
     return StageOutput(
         artifacts=dict(ARTIFACTS),
         metrics={
             "final_faces": final["faces"],
-            "untextured_face_frac": atlas["untextured_face_frac"],
+            "untextured_face_frac": untextured,
+            "untextured_face_frac_raw": atlas["untextured_face_frac"],
             "atlas_count": atlas["atlas_count"],
             "texture_s": round(timings["texture"], 1),
             "qa_p95_frac": round(qa["p95_frac"], 6),
