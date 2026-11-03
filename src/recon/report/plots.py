@@ -221,3 +221,17 @@ def plot_yaw_histogram(histogram: np.ndarray, yaw_deg: float | None, applied: bo
     ax.set_ylabel("count")
     ax.set_xlim(0, 90)
     return _save(fig, path)
+
+
+def plot_timings(durations: Mapping[str, float], path: Path) -> Path:
+    """Horizontal bars of the stage durations (seconds), in pipeline order from the top."""
+    labels, values = list(durations), list(durations.values())
+    fig = Figure(figsize=(7, 0.4 * len(labels) + 1.2))
+    ax = fig.subplots()
+    ax.barh(labels[::-1], values[::-1], color="tab:blue")
+    for y, value in enumerate(values[::-1]):
+        ax.text(value, y, f" {value:.1f} s", va="center", fontsize=8)
+    ax.set_xlabel("duration (s)")
+    ax.set_title(f"stage durations (total {sum(values):.0f} s)")
+    ax.set_xlim(0, max(values, default=1.0) * 1.2)
+    return _save(fig, path)

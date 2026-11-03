@@ -20,6 +20,7 @@ from recon.io.tables import to_jsonable
 from recon.keyframes.select import KeyframeOptions
 from recon.mesh import MeshPostOptions
 from recon.pipeline.device import DeviceInfo, DeviceOptions, Preference, probe_device
+from recon.report import ReportOptions
 from recon.sensors.sync import SyncOptions
 from recon.sfm import SfmOptions
 
@@ -51,6 +52,7 @@ class PipelineConfig:
     dense: DenseOptions = field(default_factory=DenseOptions)
     mesh_post: MeshPostOptions = field(default_factory=MeshPostOptions)
     export: ExportOptions = field(default_factory=ExportOptions)
+    report: ReportOptions = field(default_factory=ReportOptions)
 
 
 SECTIONS: dict[str, type] = {f.name: f.type for f in dataclasses.fields(PipelineConfig)}

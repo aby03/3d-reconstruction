@@ -55,11 +55,11 @@ pixi run recon list-stages     # stages in pipeline order, with their directorie
 
 ### Run the pipeline
 ```bash
-pixi run recon run --input data/room2_tiny                     # every stage: ingest ... dense, mesh_post, export
+pixi run recon run --input data/room2_tiny                     # every stage: ingest ... dense, mesh_post, export, report
 pixi run recon run --input data/room2_tiny --to keyframes      # stop after a stage
 pixi run recon run --input data/room2_tiny --set keyframes.method=uniform
 ```
-Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense, mesh_post, export), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
+Per-sequence stages (ingest, keyframes) write to `outputs/<scene>/sequences/<sequence_id>/<NN_stage>/` (here `outputs/room2_tiny/sequences/room2_tiny_20261021_211400/`); scene stages (sfm, align, dense, mesh_post, export, report), which combine every sequence of a run, write to the run dir `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose result is up to date (finished successfully with the same config section and the same upstream results, and every artifact still there) is skipped, so a second run takes about a second and changing a `keyframes.*` key re-runs only keyframes. Each invocation leaves a record in `outputs/<scene>/runs/<run_id>/`: `run_manifest.json` (status of every stage: `success`, `skipped`, `failed`), `config.resolved.yaml` (the merged config) and `logs/pipeline.log`. Every `recon run` starts a new run dir, so its scene stages run again; `--resume` continues in an existing run dir instead and skips its up-to-date scene stages:
 ```bash
 pixi run recon run --input data/room2_tiny --resume                    # the latest run
 pixi run recon run --input data/room2_tiny --resume 20261031_025715    # a given run id
@@ -227,6 +227,27 @@ Every file is reloaded and checked (GLB header and chunk lengths, no external UR
 ```bash
 ls -d outputs/room2_tiny/runs/*/07_export/model.glb | tail -1
 cat $(ls -d outputs/room2_tiny/runs/*/07_export | tail -1)/metadata.json
+```
+
+### Step 8: report
+Needs a finished export step.
+```bash
+pixi run recon report --input data/room2_tiny
+```
+Same as `recon run --only report --resume`; takes about a second. It reads the manifest of every stage of the run (the sequence stages of each sequence too) and writes `08_report/`:
+- `summary.json`: run info (scene, run id, sequences, hardware preset, pipeline version, `config_diff`: every config key that differs from `configs/default.yaml`), the union of the tool versions, `total_s`, and per stage its status (`missing` when the stage never ran), duration, backends, tools, manifest metrics, warnings and plot paths; mesh_post adds `planes` (`planes.json`), `qa` and the metric `qa_p95_tau` (dense → mesh p95 in τ), export adds `files` (from `metadata.json`) and `all_valid` (the export validates every file and fails otherwise). Then `checks`: one row per threshold (`stage`, `sequence_id`, `metric`, `value`, `op`, `threshold`, `pass`; `pass` is null when the metric is missing) and the overall `pass`.
+- `index.html`: one self-contained page (open it in a browser; the images are relative links into the stage folders, so keep the run dir together): the run, the threshold table, the config differences, the tools, a stage-duration chart (`plots/timings.png`), then one section per stage with its metrics (thresholded ones marked pass/FAIL), warnings and plots, the mesh_post plane table and geometry check, and the export file table.
+
+A threshold that fails (or a metric that is missing) is a warning in the stage manifest, never a failed stage. The thresholds are `report.thresholds.<stage>.<metric>`, minimums for `frames_valid_ratio`, `ref_jpeg_min_psnr_db` and `registered_ratio`, maximums for the other numbers, equal for `true`/`false`: `ingest.{frames_valid_ratio: 0.99, ref_jpeg_min_psnr_db: 25}`, `keyframes.max_gap_s: 1.0`, `sfm.{registered_ratio: 0.95, mean_reproj_px: 1.0}`, `align.gravity_residual_median_deg: 3.0`, `mesh_post.{untextured_face_frac: 0.01, wall_rms_max_frac: 0.002, qa_p95_tau: 2.0}`, `export.all_valid: true`.
+```bash
+D=$(ls -d outputs/room2_tiny/runs/*/08_report | tail -1)
+cat $D/summary.json
+xdg-open $D/index.html
+```
+`recon compare` prints the numeric metrics (and durations) of two reported runs side by side with their difference; give run dirs, or run ids with `--scene` (looked up under `--output-root`, default `outputs/`):
+```bash
+pixi run recon compare outputs/room2_tiny/runs/RUN_A outputs/room2_tiny/runs/RUN_B
+pixi run recon compare RUN_A RUN_B --scene room2_tiny
 ```
 
 ### Tests

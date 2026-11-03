@@ -8,13 +8,23 @@ from pathlib import Path
 from typing import Any
 
 from recon.capture.open_camera_sensors import OpenCameraSensorsLoader
-from recon.io.tables import to_jsonable
+from recon.io.tables import read_json, to_jsonable
 from recon.pipeline.config import ConfigError, PipelineConfig, load_config, resolve_hardware
 from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, tool_versions
-from recon.pipeline.run_dir import latest_run_dir, read_manifest, setup_logging
+from recon.pipeline.run_dir import latest_run_dir, read_manifest, scene_dir, setup_logging
 from recon.pipeline.runner import PipelineError, open_run, run_stages, scene_path, select_stages
 from recon.pipeline.stage import get_stage, registered_stages
-from recon.pipeline.stages import s01_ingest, s02_keyframes, s03_sfm, s04_align, s05_dense, s06_mesh_post, s07_export
+from recon.pipeline.stages import (
+    s01_ingest,
+    s02_keyframes,
+    s03_sfm,
+    s04_align,
+    s05_dense,
+    s06_mesh_post,
+    s07_export,
+    s08_report,
+)
+from recon.report.summary import compare, format_table
 from recon.sensors.sync import synchronize
 
 
@@ -112,6 +122,26 @@ def cmd_stage(args: argparse.Namespace) -> int:
         # a scene stage builds on the latest run, so a finished result is kept
         resume = "latest" if latest_run_dir(scene_path(args.input, _config(args), args.scene)) else None
     return _run(args, None, None, args.stage, args.stage if args.force else None, resume)
+
+
+def _summary_path(run: str, args: argparse.Namespace) -> Path:
+    """`08_report/summary.json` of a run given as a run dir or a run id of `--scene` under `--output-root`."""
+    path = Path(run)
+    if not path.is_dir():
+        if args.scene is None:
+            raise PipelineError(f"{run!r} is not a run dir; give --scene to look it up as a run id")
+        root = args.output_root or load_config().run.output_root
+        path = scene_dir(root, args.scene) / "runs" / run
+    summary = path / s08_report.DIR_NAME / s08_report.ARTIFACTS["summary"]
+    if not summary.is_file():
+        raise PipelineError(f"{summary} missing; run `recon report` on that run first")
+    return summary
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    a, b = (read_json(_summary_path(run, args)) for run in (args.run_a, args.run_b))
+    print(format_table(compare(a, b), a.get("run_id", "a"), b.get("run_id", "b")))
+    return 0
 
 
 def cmd_list_stages(args: argparse.Namespace) -> int:
@@ -275,6 +305,24 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
     _add_resume_arg(export, "default: the latest run, or a new run when there is none")
     export.set_defaults(func=cmd_stage, stage=s07_export.STAGE)
+
+    report = commands.add_parser(
+        "report",
+        help="summary.json and index.html of a run, thresholds checked; 08_report/ (run --only report --resume)",
+    )
+    report.add_argument("--input", required=True, type=Path, help="capture directory (root or stamp dir)")
+    _add_config_args(report)
+    _add_output_args(report)
+    report.add_argument("--force", action="store_true", help="re-run even if the result is up to date")
+    _add_resume_arg(report, "default: the latest run, or a new run when there is none")
+    report.set_defaults(func=cmd_stage, stage=s08_report.STAGE)
+
+    compare_runs = commands.add_parser("compare", help="print the metric differences of two reported runs")
+    compare_runs.add_argument("run_a", metavar="RUN_A", help="run dir, or run id with --scene")
+    compare_runs.add_argument("run_b", metavar="RUN_B", help="run dir, or run id with --scene")
+    compare_runs.add_argument("--scene", help="scene whose runs/ holds RUN_A and RUN_B")
+    compare_runs.add_argument("--output-root", type=Path, help="outputs folder (default: run.output_root)")
+    compare_runs.set_defaults(func=cmd_compare)
 
     inspect = commands.add_parser("inspect", help="load and check a capture, print a summary; writes nothing")
     _add_capture_args(inspect)

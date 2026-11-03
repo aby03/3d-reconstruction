@@ -77,6 +77,16 @@ def mesh_post_run(pipeline_run, dense_run) -> Path:
 
 
 @pytest.fixture(scope="session")
+def report_run(pipeline_run, export_run) -> Path:
+    """report of the run of `export_run`, once per session; returns its stage dir."""
+    from recon.pipeline.stages.s08_report import ReportStage
+
+    result = run_stages(pipeline_run, [ReportStage])
+    assert result.status == "success", result.error
+    return pipeline_run.stage_dir("report")
+
+
+@pytest.fixture(scope="session")
 def export_run(pipeline_run, mesh_post_run) -> Path:
     """export of the textured mesh of `mesh_post_run`, once per session; returns its stage dir."""
     from recon.pipeline.stages.s07_export import ExportStage

@@ -178,12 +178,12 @@ def test_metadata(export_run, mesh_report, align_run):
     assert bbox.shape == (2, 3) and (bbox[1] > bbox[0]).all() and bbox[0, 2] < 0.01 * mesh_report["diag"]
 
 
-def test_cli_skips(tiny_capture, output_root, export_run):
+def test_cli_skips(tiny_capture, output_root, export_run, report_run):
     mtime = (export_run / "stage_manifest.json").stat().st_mtime_ns
     args = ["--input", str(tiny_capture), "--output-root", str(output_root), "--resume", export_run.parent.name]
     assert main(["export", *args]) == 0
     assert main(["run", *args]) == 0
     assert (export_run / "stage_manifest.json").stat().st_mtime_ns == mtime
     stages = read_json(export_run.parent / "run_manifest.json")["stages"]
-    assert [s["stage"] for s in stages][-3:] == ["dense", "mesh_post", "export"]
+    assert [s["stage"] for s in stages][-3:] == ["mesh_post", "export", "report"]
     assert {s["status"] for s in stages} == {"skipped"}
