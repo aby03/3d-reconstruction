@@ -22,7 +22,13 @@ from recon.pipeline.config import PipelineConfig, load_config, select_hardware
 from recon.pipeline.device import DeviceInfo, probe_device
 from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s04_align import ARTIFACTS as ALIGN_ARTIFACTS
-from recon.pipeline.stages.s05_dense import ARTIFACTS, FILTERED_PLY, MONO_ARTIFACTS, OPTIONAL_ARTIFACTS
+from recon.pipeline.stages.s05_dense import (
+    ARTIFACTS,
+    FILTERED_PLY,
+    FUSION_ARTIFACTS,
+    MONO_ARTIFACTS,
+    OPTIONAL_ARTIFACTS,
+)
 from recon.sfm.quality import camera_centres
 
 REPORT_KEYS = {
@@ -39,6 +45,7 @@ REPORT_KEYS = {
     "filter",
     "mesh_crop",
     "mono",
+    "fusion",
     "sparse_bbox",
     "diag",
     "dense",
@@ -92,7 +99,7 @@ def _inside(xyz, box):
 def test_manifest(dense_run):
     manifest = read_manifest(dense_run)
     assert manifest.status == "success"
-    assert manifest.artifacts == {**ARTIFACTS, **OPTIONAL_ARTIFACTS, **MONO_ARTIFACTS}
+    assert manifest.artifacts == {**ARTIFACTS, **OPTIONAL_ARTIFACTS, **MONO_ARTIFACTS, **FUSION_ARTIFACTS}
     for rel in manifest.artifacts.values():
         assert (dense_run / rel).exists()
     assert list(manifest.upstream) == ["align"]
@@ -131,7 +138,7 @@ def test_report(report, aligned):
     assert list(report["tools"]) == TOOLS and all(t["returncode"] == 0 for t in report["tools"].values())
     assert report["cuda_device"] == (0 if report["backend"] == "cuda" else -2)
     assert set(report["timings"]) == {
-        "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "mono", "outputs"
+        "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "mono", "fusion", "outputs"
     }
     assert report["oom_retries"] == [] and all(t["calls"] == 1 for t in report["tools"].values())
     # ~1857 px >> 1 = 928 (the undistorted size varies a little with the SfM intrinsics): level 2 is clamped to 1
@@ -187,6 +194,20 @@ def test_mono(dense_run, report, aligned):
     assert np.median(np.abs(depth[iy, ix] - z) / z) < 0.05
     for key in ("plot_mono_fit", "plot_mono_example"):
         assert (dense_run / MONO_ARTIFACTS[key]).is_file()
+
+
+def test_fusion(dense_run, report):
+    fusion = report["fusion"]
+    assert fusion["enabled"] and fusion["views"] == report["mono"]["fitted"] and fusion["skipped_views"] == 0
+    assert np.isclose(fusion["voxel"] * 2, fusion["truncation"] / 4) and np.isclose(fusion["tau"], 0.005 * report["diag"])
+    assert fusion["faces"] > 50_000 and 0 < fusion["faces_in_box"] <= fusion["faces"]  # measured 315k, 289k
+    mesh = trimesh.load(dense_run / FUSION_ARTIFACTS["mesh_tsdf"], process=False, force="mesh")
+    assert len(mesh.faces) == fusion["faces_in_box"]
+    lo, hi = np.array(report["filter"]["box"]["min"]), np.array(report["filter"]["box"]["max"])
+    used = np.asarray(mesh.vertices)[np.unique(mesh.faces)]
+    assert (used >= lo - 1e-6).all() and (used <= hi + 1e-6).all()
+    cloud = trimesh.load(dense_run / FUSION_ARTIFACTS["mono_points"])
+    assert len(cloud.vertices) == fusion["points"] > 50_000
 
 
 def test_world_frame(report, sparse_box, aligned, dense_run):

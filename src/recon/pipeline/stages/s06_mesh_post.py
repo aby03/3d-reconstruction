@@ -5,6 +5,7 @@ texture it at full resolution with OpenMVS and fix the atlases, in world W, in
 import dataclasses
 import importlib.metadata
 import logging
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from recon.mesh import MeshPostOptions
 from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
 from recon.mesh.holes import fill_holes
+from recon.mesh.merge import merge_unsupported
 from recon.mesh.planes import regularize, write_planes
 from recon.mesh.roi import room_bounds
 from recon.mesh.texture_fix import fix_textures
@@ -39,6 +41,7 @@ MAX_QA_P95_TAU = 2.0  # dense -> mesh p95 distance above this many tau is a warn
 UNSUPPORTED_DIST_TAU = 2.0  # mesh area farther than this many tau from every dense point is unsupported
 
 ARTIFACTS = {
+    "mesh_merged": "mesh_merged.ply",
     "mesh_clean": "mesh_clean.ply",
     "mesh_holes_filled": "mesh_holes_filled.ply",
     "mesh_regularized": "mesh_regularized.ply",
@@ -63,12 +66,18 @@ def _final_report(path: Path, box: tuple[np.ndarray, np.ndarray]) -> dict[str, A
 def _qa(dense_dir: Path, final: Path, t: float, diag: float) -> dict[str, Any]:
     points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
     distances = dense_to_mesh(points, final)
-    return {
+    qa = {
         "tau": t,
         "dense_to_mesh": distances,
         "p95_frac": distances["p95"] / diag,
         "unsupported_area_frac": unsupported_area_frac(final, points, UNSUPPORTED_DIST_TAU * t),
+        "unsupported_area_frac_mono": None,
     }
+    mono = dense_dir / s05_dense.FUSION_ARTIFACTS["mono_points"]
+    if mono.is_file():  # support from the dense points and the mono depth together
+        both = np.concatenate([points, read_openmvs_points(mono)[0]])
+        qa["unsupported_area_frac_mono"] = unsupported_area_frac(final, both, UNSUPPORTED_DIST_TAU * t)
+    return qa
 
 
 def run_mesh_post(
@@ -94,11 +103,23 @@ def run_mesh_post(
     timings["load"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    bounds = None
-    if options.roi.enabled:
-        points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
-        bounds = room_bounds(points, dense["diag"], options.roi)
-    cleaned = cleanup(src, out / ARTIFACTS["mesh_clean"], options.cleanup, bounds)
+    t = tau(dense["units"], dense["diag"], options.planes.snap_dist)
+    dense_points = read_openmvs_points(dense_dir / s05_dense.ARTIFACTS["dense_points"])[0]
+    tsdf = dense_dir / s05_dense.FUSION_ARTIFACTS["mesh_tsdf"]
+    merge: dict[str, Any] = {"enabled": options.merge.enabled}
+    if options.merge.enabled and tsdf.is_file():
+        merge.update(merge_unsupported(src, tsdf, dense_points, out / ARTIFACTS["mesh_merged"], t, options.merge))
+        cleanup_src = out / ARTIFACTS["mesh_merged"]
+    else:
+        cleanup_src = src
+        merge["enabled"] = False
+        shutil.copyfile(src, out / ARTIFACTS["mesh_merged"])
+    timings["merge"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    bounds = room_bounds(dense_points, dense["diag"], options.roi) if options.roi.enabled else None
+    cleaned = cleanup(cleanup_src, out / ARTIFACTS["mesh_clean"], options.cleanup, bounds)
+    merge["output_faces"] = cleaned.before["faces"]
     timings["cleanup"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -106,7 +127,6 @@ def run_mesh_post(
     timings["holes"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    t = tau(dense["units"], dense["diag"], options.planes.snap_dist)
     planes_report, planes = regularize(
         out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_regularized"], t, options.planes
     )
@@ -195,9 +215,10 @@ def run_mesh_post(
     pymeshlab_version = importlib.metadata.version("pymeshlab")
     report: dict[str, Any] = {
         "input": f"{s05_dense.DIR_NAME}/{src_rel}",
-        "input_faces": cleaned.before["faces"],
+        "input_faces": merge.get("input_faces", cleaned.before["faces"]),
         "units": dense["units"],
         "diag": dense["diag"],
+        "merge": merge,
         "roi": {"min": bounds[0].tolist(), "max": bounds[1].tolist()} if bounds else None,
         "cleanup": dataclasses.asdict(cleaned),
         "holes": holes,

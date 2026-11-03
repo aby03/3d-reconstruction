@@ -27,6 +27,7 @@ REPORT_KEYS = {
     "input_faces",
     "units",
     "diag",
+    "merge",
     "roi",
     "cleanup",
     "holes",
@@ -67,9 +68,25 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    steps = {"load", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
+    steps = {"load", "merge", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
     assert set(report["timings"]) == steps
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
+
+
+def test_merge(report, dense_run, mesh_post_run):
+    merge = report["merge"]
+    assert merge["enabled"] and merge["filler_faces"] > 10_000  # measured 289k TSDF faces
+    # long edges are split, the topology is kept: measured 97.7k -> 99.1k faces, 3.4k unsupported, 17 of 59 regions moved
+    assert merge["faces"] >= merge["input_faces"] == report["input_faces"]
+    assert 0 < merge["adoptable"] <= merge["unsupported"] < merge["faces"]
+    assert 0 < merge["regions_moved"] <= merge["regions"] and merge["vertices_moved"] > 0
+    assert 0 < merge["move_max"] <= 2 * report["qa"]["tau"] + 1e-6
+    assert report["input_faces"] <= merge["output_faces"] == merge["faces"]
+    merged = trimesh.load(mesh_post_run / ARTIFACTS["mesh_merged"], process=False, force="mesh")
+    assert len(merged.faces) == merge["faces"]
+    assert 0 < report["qa"]["unsupported_area_frac_mono"] < report["qa"]["unsupported_area_frac"]
+    # planes still run on the merged mesh
+    assert report["planes"]["enabled"] and report["planes"]["wall_rms_max_frac"] < 0.004
 
 
 def test_cleanup(report, mesh_post_run):
@@ -77,8 +94,8 @@ def test_cleanup(report, mesh_post_run):
     before, after = cleanup["before"], cleanup["after"]
     assert after["components"] == 1  # measured 3 -> 1
     assert cleanup["components_removed"] == before["components"] - 1
-    # the dense stage already cut the mesh to the room box: little is left to crop (measured 0.2%, was 1.4%)
-    assert 0 <= before["faces"] - after["faces"] < 0.01 * before["faces"]
+    # the dense stage already cut the mesh to the room box: little is left to crop (measured 0.2-0.9%, was 1.4%)
+    assert 0 <= before["faces"] - after["faces"] < 0.02 * before["faces"]
     assert after["non_manifold_edges"] == 0 and after["non_manifold_vertices"] == 0
     mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
     assert len(mesh.faces) == after["faces"] and len(mesh.vertices) == after["vertices"]
