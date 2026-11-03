@@ -11,6 +11,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import pandas as pd
 import pycolmap
 
 from recon.dense import DenseOptions
@@ -29,10 +30,11 @@ from recon.dense.openmvs import (
     texture_preview,
 )
 from recon.dense.filter import filter_points
+from recon.dense.mono import MonoDepth, MonoOptions, ViewFit, fetch_model, fit_view, fitted_depth
 from recon.dense.undistort import undistort
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
 from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points, select_openmvs_points, write_points
-from recon.io.tables import read_json, write_json
+from recon.io.tables import read_json, write_csv, write_json, write_npz
 from recon.io.tools import ToolRunner
 from recon.mesh.cleanup import cleanup
 from recon.pipeline.device import Backend
@@ -68,12 +70,20 @@ ARTIFACTS = {
     "plot_height": "reports/plots/dense_height_hist.png",
     "plot_topdown": "reports/plots/dense_topdown.png",
 }
-# written only when refine ran / the preview is enabled
+# written only when refine ran / the preview or the mono depth is enabled
 OPTIONAL_ARTIFACTS = {
     "mesh_refine_openmvs": f"{WORK_DIR}/{REFINED_PLY}",
     "preview": "preview/mesh.obj",
 }
+MONO_ARTIFACTS = {
+    "mono": "mono",
+    "mono_fit": "reports/mono_fit.csv",
+    "plot_mono_fit": "reports/plots/mono_fit.png",
+    "plot_mono_example": "reports/plots/mono_example.png",
+}
 PREVIEW_DIR = "preview"
+MONO_COLUMNS = ["image", "points", "inliers", "inlier_ratio", "median_rel_residual", "median_rel_residual_all",
+                "scale", "shift", "fitted", "reason"]
 
 
 def inside_frac(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray]) -> float:
@@ -135,6 +145,68 @@ def retry_warning(retry: OomRetry) -> str:
 def _backend(result: DensifyResult | MeshResult | None, backend: Backend) -> Backend:
     """The backend a tool really ran on: the CPU after an OOM fallback."""
     return "cpu" if result is not None and result.cuda_device < 0 else backend
+
+
+def _view_points(rec: pycolmap.Reconstruction, image: pycolmap.Image) -> tuple[np.ndarray, np.ndarray]:
+    """Pixels (N, 2) and depths (N,) of the SfM points `image` observes, in front of its camera."""
+    obs = [(p.xy, rec.points3D[p.point3D_id].xyz) for p in image.points2D if p.has_point3D()]
+    if not obs:
+        return np.zeros((0, 2)), np.zeros(0)
+    uv, xyz = np.array([o[0] for o in obs]), np.array([o[1] for o in obs])
+    cam = image.cam_from_world().matrix()
+    z = xyz @ cam[2, :3] + cam[2, 3]
+    return uv[z > 0], z[z > 0]
+
+
+def _run_mono(
+    rec: pycolmap.Reconstruction, images_dir: Path, out: Path, options: MonoOptions, use_cuda: bool
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Mono depth of every keyframe of the undistorted model `rec`, fitted to its SfM points; the fitted depth
+    and confidence of each view that fits go to `out/mono/<image>.npz`. Returns the summary and one row per view."""
+    t0 = time.perf_counter()
+    model, source = fetch_model(options)
+    net = MonoDepth(model, use_cuda, options)
+    t_load = time.perf_counter() - t0
+    rows, fits, example = [], {}, None
+    t0 = time.perf_counter()
+    for image in sorted(rec.images.values(), key=lambda im: im.name):
+        bgr = cv2.imread(str(images_dir / image.name))
+        disparity = net.predict(bgr)
+        uv, z = _view_points(rec, image)
+        h, w = bgr.shape[:2]
+        fit = fit_view(disparity, uv * np.array([disparity.shape[1] / w, disparity.shape[0] / h]), z, options)
+        fits[image.name] = fit
+        if fit.fitted:
+            depth, confidence = fitted_depth(disparity, fit, options)
+            write_npz(
+                out / MONO_ARTIFACTS["mono"] / Path(image.name).with_suffix(".npz"),
+                True,
+                depth=depth.astype(np.float16),
+                confidence=confidence,
+            )
+            example = example or (image.name, bgr, depth, confidence)
+        rows.append({"image": image.name, **dataclasses.asdict(fit)})
+    timings = {"load": t_load, "predict_fit": time.perf_counter() - t0}
+    fitted = [f for f in fits.values() if f.fitted]
+    res = np.array([f.median_rel_residual for f in fitted])
+    ratio = np.array([f.inlier_ratio for f in fitted])
+    summary = {
+        "enabled": True,
+        "model": source,
+        "provider": net.provider,
+        "input_long_side": options.input_long_side,
+        "views": len(fits),
+        "fitted": len(fitted),
+        "skipped": {n: f.reason for n, f in fits.items() if not f.fitted},
+        "median_rel_residual": {"median": float(np.median(res)), "max": float(res.max())} if len(res) else None,
+        "inlier_ratio": {"median": float(np.median(ratio)), "min": float(ratio.min())} if len(ratio) else None,
+        "timings": {k: round(v, 3) for k, v in timings.items()},
+        "example": example[0] if example else None,
+    }
+    if example:
+        plots.plot_mono_example(example[1], example[2], example[3], out / MONO_ARTIFACTS["plot_mono_example"])
+    plots.plot_mono_fit(res, ratio, out / MONO_ARTIFACTS["plot_mono_fit"])
+    return summary, rows
 
 
 def run_dense(
@@ -236,6 +308,14 @@ def run_dense(
     timings["preview"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    mono_report, mono_rows = {"enabled": False}, []
+    if options.mono.enabled:
+        mono_report, mono_rows = _run_mono(urec, undistorted_dir / "images", out, options.mono, backend == "cuda")
+        write_csv(pd.DataFrame(mono_rows), out / MONO_ARTIFACTS["mono_fit"], MONO_COLUMNS)
+        artifacts.update(MONO_ARTIFACTS)
+    timings["mono"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     write_points(out / ARTIFACTS["dense_points"], xyz, normals, rgb)
     shutil.copyfile(mesh_ply, out / ARTIFACTS["mesh_raw"])
     mesh_raw = _mesh_report(read_mesh(out / ARTIFACTS["mesh_raw"]), box)
@@ -252,6 +332,11 @@ def run_dense(
         warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {num_raw_points}")
     retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
     warnings += [retry_warning(r) for r in retries]
+    if options.mono.enabled:
+        warnings += [f"mono depth: {n} not fitted: {why}" for n, why in mono_report["skipped"].items()]
+        worst = (mono_report["median_rel_residual"] or {}).get("max", 0.0)
+        if worst > options.mono.max_median_residual:
+            warnings.append(f"mono depth: a view has median relative residual {worst:.1%} (> {options.mono.max_median_residual:.0%})")
     meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
     for name, stats in [("dense cloud", dense_stats), *meshes]:
         frac = stats["inside_sparse_bbox_frac"]
@@ -292,6 +377,7 @@ def run_dense(
         "num_dense_points_raw": num_raw_points,
         "filter": {"enabled": options.filter.enabled, **(filter_report or {})},
         "mesh_crop": crop_report,
+        "mono": mono_report,
         "sparse_bbox": {"min": box[0].tolist(), "max": box[1].tolist()},
         "diag": diag,
         "dense": dense_stats,
@@ -330,6 +416,8 @@ def run_dense(
         backends["refine"] = _backend(refined, refine_backend)
     if preview is not None:
         backends["texture"] = _backend(preview, backend)
+    if options.mono.enabled:
+        backends["mono"] = "cuda" if mono_report["provider"] == "CUDAExecutionProvider" else "cpu"
     return StageOutput(
         artifacts=artifacts,
         metrics={
@@ -338,6 +426,7 @@ def run_dense(
             "mesh_refined_faces": mesh_refined["faces"],
             "inside_sparse_bbox_frac": dense_stats["inside_sparse_bbox_frac"],
             "largest_component_frac": mesh_raw["largest_component_frac"],
+            "mono_views_fitted": mono_report.get("fitted"),
             "densify_s": round(timings["densify"], 1),
             "refine_s": round(timings["refine"], 1),
             "peak_vram_mb": report["peak_vram_mb"],

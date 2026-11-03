@@ -149,6 +149,17 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     stat_std_ratio: 3.0          # ... and the std-devs above the mean neighbour distance that remove a point
     radius_frac: 0.01            # radius filter: radius as a fraction of the diagonal ...
     radius_min_neighbors: 8      # ... and the neighbours a point needs inside it
+  mono:                          # Depth Anything V2 small (ONNX, Apache-2.0) depth per keyframe, scale/shift fitted to the SfM points of each view
+    enabled: true
+    input_long_side: 700         # network input long side (rounded to a multiple of 14); 1857 px keyframes -> 392 x 700 (924: 2x slower, same fit)
+    cache_dir: null              # model download folder; null: ~/.cache/recon
+    min_points: 30               # a view with fewer SfM points is skipped
+    ransac_iters: 200
+    inlier_rel: 0.1              # SfM point inlier: relative depth error below this
+    min_inliers: 20
+    min_inlier_ratio: 0.5
+    max_median_residual: 0.05    # warn above this median relative residual in a view
+    edge_rel: 0.05               # depth jumps above this fraction of the depth have no confidence
   mesh:                          # ReconstructMesh
     remove_spurious: 20          # remove faces with too long edges / isolated components (0: off)
     remove_spikes: true

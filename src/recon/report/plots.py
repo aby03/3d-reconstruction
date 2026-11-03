@@ -235,3 +235,31 @@ def plot_timings(durations: Mapping[str, float], path: Path) -> Path:
     ax.set_title(f"stage durations (total {sum(values):.0f} s)")
     ax.set_xlim(0, max(values, default=1.0) * 1.2)
     return _save(fig, path)
+
+
+def plot_mono_fit(median_residuals: np.ndarray, inlier_ratios: np.ndarray, path: Path) -> Path:
+    """Per-view median relative residual and inlier ratio of the mono depth fit to the SfM points."""
+    fig = Figure(figsize=(10, 3.5))
+    ax1, ax2 = fig.subplots(1, 2)
+    for ax, values, label in ((ax1, median_residuals, "median relative residual"), (ax2, inlier_ratios, "inlier ratio")):
+        ax.hist(values, bins=20)
+        if len(values):
+            ax.axvline(np.median(values), color="tab:red", lw=0.8, ls="--", label=f"median {np.median(values):.3g}")
+            ax.legend(loc="upper right")
+        ax.set_xlabel(label)
+        ax.set_ylabel("views")
+    return _save(fig, path)
+
+
+def plot_mono_example(image_bgr: np.ndarray, depth: np.ndarray, confidence: np.ndarray, path: Path) -> Path:
+    """One keyframe next to its fitted mono depth and the confidence mask."""
+    fig = Figure(figsize=(12, 5))
+    axes = fig.subplots(1, 3)
+    axes[0].imshow(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
+    valid = depth > 0
+    axes[1].imshow(np.where(valid, depth, np.nan), cmap="turbo", vmax=np.percentile(depth[valid], 98) if valid.any() else None)
+    axes[2].imshow(confidence, cmap="gray", vmin=0, vmax=1)
+    for ax, title in zip(axes, ("keyframe", "fitted depth", "confidence")):
+        ax.set_title(title)
+        ax.axis("off")
+    return _save(fig, path)

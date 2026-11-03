@@ -1,6 +1,7 @@
 import shutil
 
 import numpy as np
+import pandas as pd
 import pycolmap
 import pytest
 import trimesh
@@ -21,7 +22,7 @@ from recon.pipeline.config import PipelineConfig, load_config, select_hardware
 from recon.pipeline.device import DeviceInfo, probe_device
 from recon.pipeline.run_dir import read_manifest
 from recon.pipeline.stages.s04_align import ARTIFACTS as ALIGN_ARTIFACTS
-from recon.pipeline.stages.s05_dense import ARTIFACTS, FILTERED_PLY, OPTIONAL_ARTIFACTS
+from recon.pipeline.stages.s05_dense import ARTIFACTS, FILTERED_PLY, MONO_ARTIFACTS, OPTIONAL_ARTIFACTS
 from recon.sfm.quality import camera_centres
 
 REPORT_KEYS = {
@@ -37,6 +38,7 @@ REPORT_KEYS = {
     "num_dense_points_raw",
     "filter",
     "mesh_crop",
+    "mono",
     "sparse_bbox",
     "diag",
     "dense",
@@ -90,12 +92,12 @@ def _inside(xyz, box):
 def test_manifest(dense_run):
     manifest = read_manifest(dense_run)
     assert manifest.status == "success"
-    assert manifest.artifacts == {**ARTIFACTS, **OPTIONAL_ARTIFACTS}
+    assert manifest.artifacts == {**ARTIFACTS, **OPTIONAL_ARTIFACTS, **MONO_ARTIFACTS}
     for rel in manifest.artifacts.values():
         assert (dense_run / rel).exists()
     assert list(manifest.upstream) == ["align"]
     backend = "cuda" if probe_device().has("dense") else "cpu"
-    assert manifest.backends == {"densify": backend, "mesh": backend, "refine": "cpu", "texture": backend}
+    assert manifest.backends == {"densify": backend, "mesh": backend, "refine": "cpu", "texture": backend, "mono": backend}
     assert manifest.tools["OpenMVS"] and manifest.tools["pycolmap"] == pycolmap.__version__
     assert manifest.warnings == []
     assert manifest.metrics["backend"] == backend and manifest.metrics["num_dense_points"] > 0
@@ -129,7 +131,7 @@ def test_report(report, aligned):
     assert list(report["tools"]) == TOOLS and all(t["returncode"] == 0 for t in report["tools"].values())
     assert report["cuda_device"] == (0 if report["backend"] == "cuda" else -2)
     assert set(report["timings"]) == {
-        "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "outputs"
+        "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "mono", "outputs"
     }
     assert report["oom_retries"] == [] and all(t["calls"] == 1 for t in report["tools"].values())
     # ~1857 px >> 1 = 928 (the undistorted size varies a little with the SfM intrinsics): level 2 is clamped to 1
@@ -155,6 +157,36 @@ def test_filter(report, dense_run, sparse_box):
     assert crop["faces_after"] == report["mesh_raw"]["faces"] <= crop["faces_before"]
     mesh = trimesh.load(dense_run / ARTIFACTS["mesh_raw"], process=False, force="mesh")
     assert (mesh.vertices >= lo - 1e-6).all() and (mesh.vertices <= hi + 1e-6).all()
+
+
+def test_mono(dense_run, report, aligned):
+    mono = report["mono"]
+    assert mono["enabled"] and mono["views"] == aligned.num_reg_images() and mono["skipped"] == {}
+    assert mono["fitted"] == mono["views"] and mono["model"]["license"] == "Apache-2.0"
+    assert len(mono["model"]["sha256"]) == 64 and mono["model"]["url"].startswith("https://")
+    assert mono["provider"] == ("CUDAExecutionProvider" if report["backend"] == "cuda" else "CPUExecutionProvider")
+    assert mono["median_rel_residual"]["max"] < 0.05  # measured median 2.3%, max 3.5%
+    assert mono["inlier_ratio"]["min"] > 0.5  # measured 0.93
+    fits = pd.read_csv(dense_run / MONO_ARTIFACTS["mono_fit"])
+    assert len(fits) == mono["views"] and fits["fitted"].all() and (fits["scale"] > 0).all()
+    assert (fits["median_rel_residual"] < 0.05).all() and (fits["inliers"] >= 20).all()
+    name = mono["example"]
+    data = np.load(dense_run / MONO_ARTIFACTS["mono"] / name.replace(".jpg", ".npz"))
+    depth, confidence = data["depth"].astype(float), data["confidence"]
+    assert depth.shape == confidence.shape and depth.shape[0] % 14 == 0 and depth.shape[1] % 14 == 0
+    assert (depth > 0).all() and 0.5 < confidence.mean() <= 1.0
+    # the fitted depth reproduces the SfM depths of the same view
+    urec = pycolmap.Reconstruction(dense_run / ARTIFACTS["undistorted_model"])
+    image = next(im for im in urec.images.values() if im.name == name)
+    cam = image.cam_from_world().matrix()
+    pts = [(p.xy, urec.points3D[p.point3D_id].xyz) for p in image.points2D if p.has_point3D()]
+    uv, z = np.array([p[0] for p in pts]), np.array([p[1] @ cam[2, :3] + cam[2, 3] for p in pts])
+    cam_model = urec.cameras[image.camera_id]
+    ix = np.clip((uv[:, 0] * depth.shape[1] / cam_model.width).astype(int), 0, depth.shape[1] - 1)
+    iy = np.clip((uv[:, 1] * depth.shape[0] / cam_model.height).astype(int), 0, depth.shape[0] - 1)
+    assert np.median(np.abs(depth[iy, ix] - z) / z) < 0.05
+    for key in ("plot_mono_fit", "plot_mono_example"):
+        assert (dense_run / MONO_ARTIFACTS[key]).is_file()
 
 
 def test_world_frame(report, sparse_box, aligned, dense_run):
@@ -307,7 +339,7 @@ def no_refine(tiny_capture, output_root, dense_run, tmp_path_factory):
     root, run_dir = tmp_path_factory.mktemp("no_refine"), dense_run.parent
     shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
     shutil.copytree(run_dir, root / "room2_tiny" / "runs" / run_dir.name, symlinks=True)
-    overrides = ["dense.refine.enabled=false", "dense.preview.enabled=false"]
+    overrides = ["dense.refine.enabled=false", "dense.preview.enabled=false", "dense.mono.enabled=false"]
     args = ["--resume", run_dir.name, "--force", "--hardware", "none", *[a for o in overrides for a in ("--set", o)]]
     assert _dense(tiny_capture, root, *args) == 0
     return root / "room2_tiny" / "runs" / run_dir.name / dense_run.name

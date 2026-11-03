@@ -76,9 +76,9 @@ def read_json(path: Path | str) -> Any:
     return json.loads(Path(path).read_text())
 
 
-def write_npz(path: Path | str, **arrays: np.ndarray) -> Path:
+def write_npz(path: Path | str, compress: bool = False, **arrays: np.ndarray) -> Path:
     def write(tmp: Path) -> None:
         with open(tmp, "wb") as f:  # a file object stops np.savez from appending ".npz"
-            np.savez(f, **arrays)
+            (np.savez_compressed if compress else np.savez)(f, **arrays)
 
     return _write_atomic(Path(path), write)
