@@ -28,6 +28,7 @@ REPORT_KEYS = {
     "units",
     "diag",
     "merge",
+    "consistency",
     "roi",
     "cleanup",
     "holes",
@@ -68,7 +69,7 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    steps = {"load", "merge", "cleanup", "holes", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
+    steps = {"load", "merge", "cleanup", "holes", "consistency", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
     assert set(report["timings"]) == steps
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
 
@@ -87,6 +88,21 @@ def test_merge(report, dense_run, mesh_post_run):
     assert 0 < report["qa"]["unsupported_area_frac_mono"] < report["qa"]["unsupported_area_frac"]
     # planes still run on the merged mesh
     assert report["planes"]["enabled"] and report["planes"]["wall_rms_max_frac"] < 0.004
+
+
+def test_consistency(report, dense_run, mesh_post_run):
+    c = report["consistency"]
+    dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
+    assert c["enabled"] and c["views"] == dense["mono"]["fitted"]
+    # measured 98.2k faces: 95.7k seen, 2.5k flagged by 3+ views, 429 removed (1.3% of the area), 2.1k flagged but backed by dense points
+    assert c["seen"] > 0.5 * c["faces"] and 0 < c["removed"] <= c["flagged"] < c["faces"]
+    assert 0 < c["removed_area_frac"] < 0.1 and c["kept_supported"] >= 0
+    kept = trimesh.load(mesh_post_run / ARTIFACTS["mesh_consistent"], process=False, force="mesh")
+    assert len(kept.faces) <= c["faces"] - c["removed"]  # floating pieces may go too
+    assert len(kept.faces) > 0.9 * (c["faces"] - c["removed"])
+    holes = trimesh.load(mesh_post_run / ARTIFACTS["mesh_holes_filled"], process=False, force="mesh")
+    assert len(holes.faces) == c["faces"]
+    assert report["qa"]["p95_frac"] < 0.01  # removing unsupported faces keeps dense -> mesh p95 (0.41% either way)
 
 
 def test_cleanup(report, mesh_post_run):
@@ -148,13 +164,13 @@ def test_planes(report, mesh_post_run, tmp_path):
     assert planes["coverage"] > 0.3  # measured 0.54
     assert planes["wall_rms_max_frac"] < 0.004  # 0.0015-0.0028 (room2: 0.0016)
     assert planes["snap"]["max"] <= 1.5 * tau and planes["flipped_faces"] == 0
-    filled = trimesh.load(mesh_post_run / ARTIFACTS["mesh_holes_filled"], process=False, force="mesh")
+    consistent = trimesh.load(mesh_post_run / ARTIFACTS["mesh_consistent"], process=False, force="mesh")
     regularized = trimesh.load(mesh_post_run / ARTIFACTS["mesh_regularized"], process=False, force="mesh")
-    assert np.array_equal(regularized.faces, filled.faces) and len(regularized.vertices) == len(filled.vertices)
+    assert np.array_equal(regularized.faces, consistent.faces) and len(regularized.vertices) == len(consistent.vertices)
     for p in stored:  # snapped vertices sit on their plane
         assert p["rms_after"] <= p["rms_before"]
 
-    src = mesh_post_run / ARTIFACTS["mesh_holes_filled"]
+    src = mesh_post_run / ARTIFACTS["mesh_consistent"]
     off, none = regularize(src, tmp_path / "off.ply", tau, PlaneOptions(enabled=False))
     assert off == {"enabled": False, "tau": tau} and none == []
     assert (tmp_path / "off.ply").read_bytes() == src.read_bytes()
@@ -162,7 +178,7 @@ def test_planes(report, mesh_post_run, tmp_path):
 
 def test_decimate(report, mesh_post_run, tmp_path):
     # tiny (101k faces) is within the 600k budget: the final geometry is the regularized mesh
-    faces = report["holes"]["filled_faces"] + report["cleanup"]["after"]["faces"]
+    faces = len(trimesh.load(mesh_post_run / ARTIFACTS["mesh_consistent"], process=False, force="mesh").faces)
     assert report["decimate"] == {"decimated": False, "faces_in": faces, "faces_out": faces, "budget": 600_000}
     clean = mesh_post_run / ARTIFACTS["mesh_clean"]
     regularized = mesh_post_run / ARTIFACTS["mesh_regularized"]

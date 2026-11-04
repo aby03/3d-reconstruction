@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from recon.mesh.cleanup import CleanupOptions
+from recon.mesh.consistency import ConsistencyOptions
 from recon.mesh.decimate import DecimateOptions
 from recon.mesh.holes import HoleOptions
 from recon.mesh.merge import MergeOptions
@@ -17,6 +18,7 @@ class MeshPostOptions:
     roi: RoiOptions = field(default_factory=RoiOptions)
     merge: MergeOptions = field(default_factory=MergeOptions)
     cleanup: CleanupOptions = field(default_factory=CleanupOptions)
+    consistency: ConsistencyOptions = field(default_factory=ConsistencyOptions)
     holes: HoleOptions = field(default_factory=HoleOptions)
     planes: PlaneOptions = field(default_factory=PlaneOptions)
     decimate: DecimateOptions = field(default_factory=DecimateOptions)

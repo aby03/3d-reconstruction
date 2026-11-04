@@ -207,6 +207,16 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
   holes:                         # close small boundary loops (tiny and room2 have only the outer one)
     small_hole_max_edges: 100
     max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary
+  consistency:                   # remove unsupported faces that keyframes see through (mesh depth vs fitted mono depth, Open3D ray casting), after hole filling
+    enabled: true
+    pixel_stride: 2              # every n-th pixel of each mono depth map is a ray
+    free_rel: 0.1                # the mesh counts as in free space where nearer than the view depth by this fraction of it ...
+    free_tau: 2.0                # ... and by at least this many tau
+    min_face_frac: 0.5           # a view sees a face as free space when this share of its pixels in that view is
+    min_views: 3                 # removed when at least this many views see it as free space
+    unsupported_tau: 2.0         # only faces farther than this many tau from every dense point can be removed
+    min_inlier_ratio: 0.7        # only views whose mono depth fits the SfM points this well count ...
+    max_residual: 0.05           # ... with a median relative residual of at most this
   planes:                        # snap walls/floor/ceiling flat, straighten their edges (room2: 19 planes, 35% of the area)
     enabled: true
     snap_dist: null              # tau; null = 0.005 * diag (arbitrary units) or 0.02 (metres)

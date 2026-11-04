@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from recon.dense.openmvs import TEXTURE_MESH, cuda_device
 from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points
@@ -19,6 +20,7 @@ from recon.io.tools import ToolRunner
 from recon.mesh import MeshPostOptions
 from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
+from recon.mesh.consistency import ConsistencyView, remove_free_space
 from recon.mesh.holes import fill_holes
 from recon.mesh.merge import merge_unsupported
 from recon.mesh.planes import regularize, write_planes
@@ -44,6 +46,7 @@ ARTIFACTS = {
     "mesh_merged": "mesh_merged.ply",
     "mesh_clean": "mesh_clean.ply",
     "mesh_holes_filled": "mesh_holes_filled.ply",
+    "mesh_consistent": "mesh_consistent.ply",
     "mesh_regularized": "mesh_regularized.ply",
     "planes": "planes.json",
     "mesh_final_geometry": "mesh_final_geometry.ply",
@@ -127,8 +130,31 @@ def run_mesh_post(
     timings["holes"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    consistency: dict[str, Any] = {"enabled": False}
+    fits = dense_dir / s05_dense.MONO_ARTIFACTS["mono_fit"]
+    if options.consistency.enabled and fits.is_file():
+        c = options.consistency
+        views = s05_dense.load_mono_views(dense_dir, pd.read_csv(fits), c.min_inlier_ratio, c.max_residual)
+        consistency = {
+            "enabled": True,
+            **remove_free_space(
+                out / ARTIFACTS["mesh_holes_filled"],
+                out / ARTIFACTS["mesh_consistent"],
+                dense_points,
+                [ConsistencyView(*v) for v in views],
+                t,
+                c,
+            ),
+        }
+        # faces removed can leave floating pieces
+        cleanup(out / ARTIFACTS["mesh_consistent"], out / ARTIFACTS["mesh_consistent"], options.cleanup)
+    else:
+        shutil.copyfile(out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_consistent"])
+    timings["consistency"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     planes_report, planes = regularize(
-        out / ARTIFACTS["mesh_holes_filled"], out / ARTIFACTS["mesh_regularized"], t, options.planes
+        out / ARTIFACTS["mesh_consistent"], out / ARTIFACTS["mesh_regularized"], t, options.planes
     )
     write_planes(out / ARTIFACTS["planes"], planes)
     if planes_report["enabled"]:
@@ -219,6 +245,7 @@ def run_mesh_post(
         "units": dense["units"],
         "diag": dense["diag"],
         "merge": merge,
+        "consistency": consistency,
         "roi": {"min": bounds[0].tolist(), "max": bounds[1].tolist()} if bounds else None,
         "cleanup": dataclasses.asdict(cleaned),
         "holes": holes,

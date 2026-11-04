@@ -216,27 +216,19 @@ def _run_mono(
     return summary, rows
 
 
-def _run_fusion(
-    rec: pycolmap.Reconstruction,
-    out: Path,
-    fits: list[dict[str, Any]],
-    options: FusionOptions,
-    t: float,
-    diag: float,
-    box: tuple[np.ndarray, np.ndarray] | None,
-) -> dict[str, Any]:
-    """TSDF of the mono depth of the views that fit well, into `out/mesh_tsdf.ply` (faces inside `box` only) and
-    `out/mono_points.ply` (the depth as points). Returns the report."""
-    good = {
-        f["image"]
-        for f in fits
-        if f["fitted"] and f["inlier_ratio"] >= options.min_inlier_ratio and f["median_rel_residual"] <= options.max_residual
-    }
+def load_mono_views(
+    dense_dir: Path, fits: pd.DataFrame, min_inlier_ratio: float, max_residual: float
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """(depth, K, cam_from_world) of every view of the dense stage dir `dense_dir` whose mono depth fits the SfM
+    points well (`fits`: rows of `mono_fit.csv`): the depth with the unconfident pixels at 0, the intrinsics at
+    the depth map's size, the 4x4 pose."""
+    good = fits[fits["fitted"] & (fits["inlier_ratio"] >= min_inlier_ratio) & (fits["median_rel_residual"] <= max_residual)]
+    rec = pycolmap.Reconstruction(dense_dir / ARTIFACTS["undistorted_model"])
     by_name = {im.name: im for im in rec.images.values()}
     views = []
-    for name in sorted(good):
+    for name in sorted(good["image"]):
         image = by_name[name]
-        data = np.load(out / MONO_ARTIFACTS["mono"] / Path(name).with_suffix(".npz"))
+        data = np.load(dense_dir / MONO_ARTIFACTS["mono"] / Path(name).with_suffix(".npz"))
         depth = data["depth"].astype(np.float32)
         depth[data["confidence"] == 0] = 0.0
         cam = rec.cameras[image.camera_id]
@@ -246,14 +238,31 @@ def _run_fusion(
         K = np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1]])
         T = np.eye(4)
         T[:3] = image.cam_from_world().matrix()
-        views.append(FusionView(depth, K, T))
+        views.append((depth, K, T))
+    return views
+
+
+def _run_fusion(
+    out: Path,
+    fits: list[dict[str, Any]],
+    options: FusionOptions,
+    t: float,
+    diag: float,
+    box: tuple[np.ndarray, np.ndarray] | None,
+) -> dict[str, Any]:
+    """TSDF of the mono depth of the views that fit well, into `out/mesh_tsdf.ply` (faces inside `box` only) and
+    `out/mono_points.ply` (the depth as points). Returns the report."""
+    table = pd.DataFrame(fits)
+    views = [
+        FusionView(*v) for v in load_mono_views(out, table, options.min_inlier_ratio, options.max_residual)
+    ]
     vertices, faces, points, report = fuse(views, diag, t, options)
     if box is not None and len(faces):
         inside = ((vertices >= box[0]) & (vertices <= box[1])).all(axis=1)
         faces = faces[inside[faces].all(axis=1)]
     trimesh.Trimesh(vertices, faces, process=False).export(out / FUSION_ARTIFACTS["mesh_tsdf"])
     write_points(out / FUSION_ARTIFACTS["mono_points"], points, np.zeros_like(points), np.zeros((len(points), 3), np.uint8))
-    return {"enabled": True, "tau": t, "skipped_views": len(fits) - len(good), **report, "faces_in_box": len(faces)}
+    return {"enabled": True, "tau": t, "skipped_views": len(fits) - len(views), **report, "faces_in_box": len(faces)}
 
 
 def run_dense(
@@ -371,7 +380,7 @@ def run_dense(
             else None
         )
         t = options.fusion.tau if options.fusion.tau is not None else geometry_tau(units, diag)
-        fusion_report = _run_fusion(urec, out, mono_rows, options.fusion, t, diag, room)
+        fusion_report = _run_fusion(out, mono_rows, options.fusion, t, diag, room)
         artifacts.update(FUSION_ARTIFACTS)
     timings["fusion"] = time.perf_counter() - t0
 
