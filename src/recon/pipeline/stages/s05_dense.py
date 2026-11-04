@@ -438,6 +438,7 @@ def run_dense(
             "effective_long_side": dense.effective_long_side,
             "number_views": o.number_views,
             "number_views_fuse": o.number_views_fuse,
+            "fusion_filter": o.fusion_filter,
             "iters": o.iters,
             "geometric_iters": o.geometric_iters,
             "crop_to_roi": o.crop_to_roi,

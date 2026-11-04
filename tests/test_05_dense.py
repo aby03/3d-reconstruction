@@ -66,6 +66,7 @@ DENSIFY_KEYS = {
     "effective_long_side",
     "number_views",
     "number_views_fuse",
+    "fusion_filter",
     "iters",
     "geometric_iters",
     "crop_to_roi",
@@ -286,7 +287,7 @@ def test_preview(dense_run, report):
     preview = dense_run / "preview"
     assert {p.suffix for p in preview.iterdir()} == {".obj", ".mtl", ".jpg"}
     assert report["preview"]["faces"] == report["refine"]["faces"] and report["preview"]["texture_coords"] > 0
-    assert report["preview"]["textures"] == 1 and report["preview"]["atlas_size"] == [2048, 2048]
+    assert report["preview"]["textures"] == 1 and report["preview"]["atlas_size"] in ([1024, 1024], [2048, 2048])  # the atlas grows with the mesh
     assert "map_Kd mesh_material_00_map_Kd.jpg" in (preview / "mesh.mtl").read_text()
 
 

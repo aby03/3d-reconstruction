@@ -131,6 +131,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     max_resolution: 2560
     number_views: 6              # neighbour views per depth map (tiny: 6 -> 70 s, 8 + iters 4 -> 101 s)
     number_views_fuse: 3         # a fused point needs this many agreeing depth maps
+    fusion_filter: 1             # depth-map fusion filter (OpenMVS default 2 keeps ~4.7x fewer points on room2)
     sub_resolution_levels: 2
     iters: 3                     # patch-match iterations
     geometric_iters: 2           # geometric-consistency iterations (1: -19% time, -5% points on tiny)

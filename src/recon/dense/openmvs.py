@@ -38,6 +38,7 @@ class OpenMvsOptions:
     max_resolution: int = 2560
     number_views: int = 6
     number_views_fuse: int = 3
+    fusion_filter: int = 1  # depth-map fusion filter of DensifyPointCloud (OpenMVS default 2 keeps far fewer points)
     sub_resolution_levels: int = 2
     iters: int = 3
     geometric_iters: int = 2
@@ -128,6 +129,7 @@ def densify_args(options: OpenMvsOptions, device: int) -> list[str]:
         "--max-resolution", o.max_resolution,
         "--number-views", o.number_views,
         "--number-views-fuse", o.number_views_fuse,
+        "--fusion-filter", o.fusion_filter,
         "--sub-resolution-levels", o.sub_resolution_levels,
         "--iters", o.iters,
         "--geometric-iters", o.geometric_iters,
