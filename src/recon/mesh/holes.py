@@ -89,13 +89,12 @@ def fill_holes(src: Path, out: Path, options: HoleOptions | None = None) -> dict
     selected[edge_faces[np.isin(edges[:, 0], np.concatenate(small))]] = 1
     ms = pymeshlab.MeshSet()
     ms.add_mesh(pymeshlab.Mesh(vertex_matrix=vertices, face_matrix=np.asarray(mesh.faces), f_scalar_array=selected))
-    holes_before = ms.get_topological_measures()["number_holes"]  # clears the selection: measure first
     ms.compute_selection_by_condition_per_face(condselect="fq > 0")
     ms.meshing_close_holes(
         maxholesize=options.small_hole_max_edges, selected=True, newfaceselected=False, selfintersection=False
     )
     ms.compute_normal_per_vertex()
-    result["filled"] = holes_before - ms.get_topological_measures()["number_holes"]
     result["filled_faces"] = ms.current_mesh().face_number() - len(mesh.faces)
     save(ms, out)
+    result["filled"] = len(loops) - len(boundary_loops(read_mesh(out)))
     return result
