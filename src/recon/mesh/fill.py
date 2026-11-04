@@ -10,6 +10,7 @@ import open3d as o3d
 import trimesh
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
+from scipy.spatial import cKDTree
 
 from recon.io.ply import read_mesh
 
@@ -19,6 +20,7 @@ class FillOptions:
     enabled: bool = True
     gap_tau: float = 3.0  # a filler face is a gap face when its centroid is farther than this many tau from the mesh
     min_area_frac: float = 0.005  # a connected patch of gap faces is added when its area is at least this share of the mesh area
+    overlap_tau: float = 2.0  # patches grow by this many tau beyond gap_tau, so they overlap the mesh
 
 
 def fill_gaps(
@@ -45,6 +47,11 @@ def fill_gaps(
     area = np.bincount(labels, weights=b.area_faces, minlength=count)
     big = area >= options.min_area_frac * a.area
     keep = gap & big[labels]
+    if keep.any() and options.overlap_tau > 0:
+        # the gap is measured from the mesh, so a patch stops gap_tau short of it: grow it across that ring
+        reach = (options.gap_tau + options.overlap_tau) * tau
+        near = cKDTree(centres[keep]).query(centres, distance_upper_bound=reach)[0] <= reach
+        keep |= near & (bounds is None or np.all((centres >= bounds[0]) & (centres <= bounds[1]), axis=1))
     report["patches"] = int((big & (np.bincount(labels[gap], minlength=count) > 0)).sum())
     report["added_faces"] = int(keep.sum())
     report["added_area_frac"] = float(b.area_faces[keep].sum() / a.area)

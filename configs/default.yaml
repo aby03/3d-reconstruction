@@ -208,6 +208,7 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     enabled: true
     gap_tau: 3.0                 # a TSDF face is in a gap when its centroid is farther than this many tau from the mesh
     min_area_frac: 0.005         # a connected patch is added when its area is at least this share of the mesh area
+    overlap_tau: 2.0             # patches grow by this many tau beyond gap_tau, so they overlap the mesh
   holes:                         # close small boundary loops (tiny and room2 have only the outer one)
     small_hole_max_edges: 100
     max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary

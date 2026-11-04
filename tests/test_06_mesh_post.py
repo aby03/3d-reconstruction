@@ -94,7 +94,7 @@ def test_merge(report, dense_run, mesh_post_run):
 def test_fill(report, mesh_post_run):
     fill = report["fill"]
     assert fill["enabled"] and fill["filler_faces"] > 10_000
-    assert 0 <= fill["added_faces"] <= fill["gap_faces"] <= fill["filler_faces"]
+    assert 0 <= fill["gap_faces"] <= fill["filler_faces"] and 0 <= fill["added_faces"] <= fill["filler_faces"]  # patches grow past the gap
     filled = trimesh.load(mesh_post_run / ARTIFACTS["mesh_filled"], process=False, force="mesh")
     clean = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
     assert len(filled.faces) == len(clean.faces) + fill["added_faces"]
