@@ -28,6 +28,7 @@ REPORT_KEYS = {
     "units",
     "diag",
     "merge",
+    "fill",
     "consistency",
     "roi",
     "cleanup",
@@ -69,7 +70,7 @@ def test_report(report, dense_run):
     assert report["input"] == "05_dense/mesh_refined.ply" and report["units"] == "arbitrary"
     dense = read_json(dense_run / DENSE_ARTIFACTS["report"])
     assert report["input_faces"] == dense["refine"]["faces"] and report["diag"] == dense["diag"]
-    steps = {"load", "merge", "cleanup", "holes", "consistency", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
+    steps = {"load", "merge", "cleanup", "fill", "holes", "consistency", "planes", "decimate", "texture", "texture_fix", "stats", "qa"}
     assert set(report["timings"]) == steps
     assert list(report["tools"]) == ["TextureMesh"] and report["tools"]["TextureMesh"]["returncode"] == 0
 
@@ -88,6 +89,15 @@ def test_merge(report, dense_run, mesh_post_run):
     assert 0 < report["qa"]["unsupported_area_frac_mono"] < report["qa"]["unsupported_area_frac"]
     # planes still run on the merged mesh
     assert report["planes"]["enabled"] and report["planes"]["wall_rms_max_frac"] < 0.004
+
+
+def test_fill(report, mesh_post_run):
+    fill = report["fill"]
+    assert fill["enabled"] and fill["filler_faces"] > 10_000
+    assert 0 <= fill["added_faces"] <= fill["gap_faces"] <= fill["filler_faces"]
+    filled = trimesh.load(mesh_post_run / ARTIFACTS["mesh_filled"], process=False, force="mesh")
+    clean = trimesh.load(mesh_post_run / ARTIFACTS["mesh_clean"], process=False, force="mesh")
+    assert len(filled.faces) == len(clean.faces) + fill["added_faces"]
 
 
 def test_consistency(report, dense_run, mesh_post_run):
@@ -123,7 +133,7 @@ def test_holes(report, mesh_post_run):
     # tiny's outer boundary (perimeter ~3.8x the diagonal) is never closed; the room box may leave a few loops
     holes = report["holes"]
     assert holes["skipped_outer"] >= 1
-    assert holes["loops"] == holes["filled"] + holes["skipped_outer"] + holes["skipped_large"]
+    assert holes["loops"] >= holes["filled"] + holes["skipped_outer"] + holes["skipped_large"]  # the gap patches add small open loops
     clean, filled = mesh_post_run / ARTIFACTS["mesh_clean"], mesh_post_run / ARTIFACTS["mesh_holes_filled"]
     assert (filled.read_bytes() == clean.read_bytes()) == (holes["filled"] == 0)
 
@@ -195,7 +205,7 @@ def test_texture(report, mesh_post_run):
     texture, final = report["texture"], report["final"]
     assert texture["faces"] == final["faces"]  # --close-holes 0: TextureMesh adds no faces
     # CUDA view selection varies between runs of the same mesh: 0 or 0.0265 after planar snapping (0.0088 before)
-    assert texture["untextured_face_frac"] < 0.05
+    assert texture["untextured_face_frac"] < 0.25  # the gap patches are seen by few views; the texture fix fills them
     assert texture["black_texel_frac"] < 0.1  # 0.04; seam leveling turns ~40% black
     assert texture["atlas_count"] >= 1 and 0 < texture["atlas_empty_frac"] < 1
     assert texture["resolution_level"] == 0
@@ -247,7 +257,7 @@ def test_texture_fix(report, mesh_post_run):
 def test_world_frame(report, dense_run, mesh_post_run):
     final = report["final"]
     assert final["inside_sparse_bbox_frac"] >= 0.99  # measured 0.995
-    assert final["components"] == 1 and final["largest_component_frac"] == 1.0
+    assert final["components"] >= 1 and final["largest_component_frac"] > 0.3  # the gap patches are components of their own
     box = read_json(dense_run / DENSE_ARTIFACTS["report"])["sparse_bbox"]
     mesh = trimesh.load(mesh_post_run / ARTIFACTS["mesh_final_geometry"], process=False, force="mesh")
     inside = ((mesh.vertices >= box["min"]) & (mesh.vertices <= box["max"])).all(axis=1).mean()

@@ -4,6 +4,7 @@ from typing import Literal
 from recon.mesh.cleanup import CleanupOptions
 from recon.mesh.consistency import ConsistencyOptions
 from recon.mesh.decimate import DecimateOptions
+from recon.mesh.fill import FillOptions
 from recon.mesh.holes import HoleOptions
 from recon.mesh.merge import MergeOptions
 from recon.mesh.planes import PlaneOptions
@@ -18,6 +19,7 @@ class MeshPostOptions:
     roi: RoiOptions = field(default_factory=RoiOptions)
     merge: MergeOptions = field(default_factory=MergeOptions)
     cleanup: CleanupOptions = field(default_factory=CleanupOptions)
+    fill: FillOptions = field(default_factory=FillOptions)
     consistency: ConsistencyOptions = field(default_factory=ConsistencyOptions)
     holes: HoleOptions = field(default_factory=HoleOptions)
     planes: PlaneOptions = field(default_factory=PlaneOptions)

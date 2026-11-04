@@ -22,6 +22,7 @@ from recon.mesh.cleanup import cleanup
 from recon.mesh.decimate import decimate
 from recon.mesh.consistency import ConsistencyView, remove_free_space
 from recon.mesh.holes import fill_holes
+from recon.mesh.fill import fill_gaps
 from recon.mesh.merge import merge_unsupported
 from recon.mesh.planes import regularize, write_planes
 from recon.mesh.roi import room_bounds
@@ -45,6 +46,7 @@ UNSUPPORTED_DIST_TAU = 2.0  # mesh area farther than this many tau from every de
 ARTIFACTS = {
     "mesh_merged": "mesh_merged.ply",
     "mesh_clean": "mesh_clean.ply",
+    "mesh_filled": "mesh_filled.ply",
     "mesh_holes_filled": "mesh_holes_filled.ply",
     "mesh_consistent": "mesh_consistent.ply",
     "mesh_regularized": "mesh_regularized.ply",
@@ -126,7 +128,18 @@ def run_mesh_post(
     timings["cleanup"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    holes = fill_holes(out / ARTIFACTS["mesh_clean"], out / ARTIFACTS["mesh_holes_filled"], options.holes)
+    fill: dict[str, Any] = {"enabled": options.fill.enabled and tsdf.is_file()}
+    if fill["enabled"]:
+        # the room box of the dense stage: the density-based `bounds` stop short of the sparsely seen ceiling
+        room = dense.get("filter", {}).get("box")
+        fill_box = (np.array(room["min"]), np.array(room["max"])) if room else bounds
+        fill.update(fill_gaps(out / ARTIFACTS["mesh_clean"], tsdf, out / ARTIFACTS["mesh_filled"], t, options.fill, fill_box))
+    else:
+        shutil.copyfile(out / ARTIFACTS["mesh_clean"], out / ARTIFACTS["mesh_filled"])
+    timings["fill"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    holes = fill_holes(out / ARTIFACTS["mesh_filled"], out / ARTIFACTS["mesh_holes_filled"], options.holes)
     timings["holes"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -205,7 +218,8 @@ def run_mesh_post(
         warnings.append(f"{untextured:.1%} of the faces untextured (> {MAX_UNTEXTURED_FRAC:.0%})")
     if fixed["sentinel_in_faces"]:
         warnings.append(f"texture fix: {fixed['sentinel_in_faces']} empty texels left inside faces")
-    if final["largest_component_frac"] < s05_dense.MIN_LARGEST_COMPONENT_FRAC:
+    # the gap patches are components of their own
+    if not fill.get("added_faces") and final["largest_component_frac"] < s05_dense.MIN_LARGEST_COMPONENT_FRAC:
         warnings.append(
             f"final mesh: largest component has {final['largest_component_frac']:.1%} of the faces"
             f" ({final['components']} components)"
@@ -245,6 +259,7 @@ def run_mesh_post(
         "units": dense["units"],
         "diag": dense["diag"],
         "merge": merge,
+        "fill": fill,
         "consistency": consistency,
         "roi": {"min": bounds[0].tolist(), "max": bounds[1].tolist()} if bounds else None,
         "cleanup": dataclasses.asdict(cleaned),
