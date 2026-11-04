@@ -21,6 +21,8 @@ class FillOptions:
     gap_tau: float = 3.0  # a filler face is a gap face when its centroid is farther than this many tau from the mesh
     min_area_frac: float = 0.005  # a connected patch of gap faces is added when its area is at least this share of the mesh area
     overlap_tau: float = 2.0  # patches grow by this many tau beyond gap_tau, so they overlap the mesh
+    weld: bool = False  # drop the mesh faces under a patch's overlap and join the two along the cut
+    weld_tau: float = 1.0  # mesh and patch border vertices closer than this many tau are merged
 
 
 def fill_gaps(
@@ -56,6 +58,44 @@ def fill_gaps(
     report["added_faces"] = int(keep.sum())
     report["added_area_frac"] = float(b.area_faces[keep].sum() / a.area)
     if keep.any():
-        a = trimesh.util.concatenate([a, b.submesh([np.flatnonzero(keep)], append=True)])
+        patch = b.submesh([np.flatnonzero(keep)], append=True)
+        if options.weld:
+            a, report["welded_vertices"] = _weld(a, patch, tau, options)
+        else:
+            a = trimesh.util.concatenate([a, patch])
     a.export(out)
     return report
+
+
+def _border_vertices(mesh: trimesh.Trimesh) -> np.ndarray:
+    """Indices of the vertices on boundary edges (edges used by one face)."""
+    edges = mesh.edges_sorted
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    return np.unique(unique[counts == 1])
+
+
+def _weld(mesh: trimesh.Trimesh, patch: trimesh.Trimesh, tau: float, options: FillOptions) -> tuple[trimesh.Trimesh, int]:
+    """Remove the mesh faces that lie under the patch (within the overlap width), then snap the cut border of
+    the mesh onto the border of the patch and merge the coincident vertices."""
+    under = cKDTree(patch.triangles_center).query(mesh.triangles_center)[0] <= options.overlap_tau * tau
+    mesh = mesh.copy()
+    mesh.update_faces(~under)
+    mesh.remove_unreferenced_vertices()
+    border_m, border_p = _border_vertices(mesh), _border_vertices(patch)
+    snapped = 0
+    if len(border_m) and len(border_p):
+        dist, idx = cKDTree(patch.vertices[border_p]).query(mesh.vertices[border_m], distance_upper_bound=options.weld_tau * tau)
+        close = np.isfinite(dist)
+        mesh.vertices[border_m[close]] = patch.vertices[border_p[idx[close]]]
+        snapped = int(close.sum())
+    joined = trimesh.util.concatenate([mesh, patch])
+    joined.merge_vertices()
+    joined.update_faces(joined.nondegenerate_faces())
+    for _ in range(5):  # snapping many border vertices onto one makes edges shared by 3+ faces: drop those faces
+        unique, inverse, counts = np.unique(joined.edges_sorted, axis=0, return_inverse=True, return_counts=True)
+        bad = (counts[inverse.ravel()] > 2).reshape(-1, 3).any(axis=1)
+        if not bad.any():
+            break
+        joined.update_faces(~bad)
+    joined.remove_unreferenced_vertices()
+    return joined, snapped
