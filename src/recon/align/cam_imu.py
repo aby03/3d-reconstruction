@@ -48,6 +48,8 @@ def keyframe_pairs(
     pairs, R_cam = [], []
     for i in range(len(names)):
         for j in range(i + 1, min(i + span + 1, len(names))):
+            if times[j] == times[i]:  # two cameras saved the same frame: no rotation, no time step
+                continue
             pairs.append((names[i], names[j], times[i], times[j]))
             R_cam.append(R[names[j]] @ R[names[i]].T)
     table = pd.DataFrame(pairs, columns=["image_a", "image_b", "t_a_ns", "t_b_ns"])

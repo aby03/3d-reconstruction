@@ -117,7 +117,7 @@ def test_intrinsics(sfm_run, report, sid):
 
 
 def _run(capture, root, *args):
-    return main(["run", "--input", str(capture), "--output-root", str(root), *args])
+    return main(["run", "--input", str(capture), "--output-root", str(root), "--set", "keyframes.stills=false", *args])
 
 
 def test_resume_skips_sfm(tiny_capture, output_root, sfm_run):

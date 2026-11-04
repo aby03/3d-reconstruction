@@ -1,6 +1,7 @@
 """Step 2: select keyframes, extract them at full resolution and write their IMU priors into `02_keyframes/`."""
 
 import logging
+import shutil
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ log = logging.getLogger(__name__)
 STAGE = "keyframes"
 DIR_NAME = "02_keyframes"
 CAMERA_ID = "cam0"
+STILLS_CAMERA_ID = "cam1"  # the reference JPEGs: their own camera, so SfM calibrates its lens separately
 KEYFRAMES_COLUMNS = ["idx", "t_ns", "image_name", "quality", "sharp_rel", "omega_norm", "trigger", "gap_s"]
 FRAME_SCORES_COLUMNS = [*SCORE_COLUMNS[:-2], "flow_med", "track_ratio", *SCORE_COLUMNS[-2:]]
 GRAVITY_COLUMNS = ["image_name", "gx", "gy", "gz", "conf"]
@@ -91,6 +93,34 @@ def _keyframes_table(scores: pd.DataFrame, selection: Selection, names: dict[int
             "omega_norm": rows["omega_norm"].to_numpy(),
             "trigger": selection.triggers,
             "gap_s": gap_s,
+        }
+    )
+
+
+def _copy_stills(loader: BaseCaptureLoader, sequence_id: str, frames: pd.DataFrame, images: Path) -> dict[int, str]:
+    """Copy the capture's reference JPEGs (frame index -> file) to `images/<stills camera>/` unchanged; frame index -> image name."""
+    refs = loader.load().reference_images
+    folder = images / STILLS_CAMERA_ID
+    folder.mkdir(parents=True, exist_ok=True)
+    names = {}
+    for idx, path in sorted(refs.items()):
+        names[idx] = image_name(sequence_id, idx, STILLS_CAMERA_ID)
+        shutil.copyfile(path, folder / f"{idx:06d}.jpg")
+    return names
+
+
+def _stills_table(frames: pd.DataFrame, names: dict[int, str]) -> pd.DataFrame:
+    idx = np.array(sorted(names), dtype=int)
+    return pd.DataFrame(
+        {
+            "idx": idx,
+            "t_ns": frames["t_ns"].to_numpy()[idx],
+            "image_name": [names[i] for i in idx],
+            "quality": np.nan,
+            "sharp_rel": np.nan,
+            "omega_norm": np.nan,
+            "trigger": "still",
+            "gap_s": np.nan,
         }
     )
 
@@ -222,10 +252,16 @@ def run_keyframes(
 
     t0 = time.perf_counter()
     keyframes = _keyframes_table(scores, selection, names)
-    write_csv(keyframes, out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
+    still_names = _copy_stills(loader, sequence_id, frames, out / ARTIFACTS["images"]) if options.stills else {}
+    table = pd.concat([keyframes, _stills_table(frames, still_names)], ignore_index=True)
+    write_csv(table, out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
 
     gravity = gravity_priors(frames, indices)
     gravity.insert(0, "image_name", gravity.pop("idx").map(names))
+    if still_names:
+        still_gravity = gravity_priors(frames, list(still_names))
+        still_gravity.insert(0, "image_name", still_gravity.pop("idx").map(still_names))
+        gravity = pd.concat([gravity, still_gravity], ignore_index=True)
     write_csv(gravity, out / ARTIFACTS["gravity_priors"], GRAVITY_COLUMNS)
 
     warnings = []

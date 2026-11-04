@@ -180,7 +180,7 @@ def test_metadata(export_run, mesh_report, align_run):
 
 def test_cli_skips(tiny_capture, output_root, export_run, report_run):
     mtime = (export_run / "stage_manifest.json").stat().st_mtime_ns
-    args = ["--input", str(tiny_capture), "--output-root", str(output_root), "--resume", export_run.parent.name]
+    args = ["--input", str(tiny_capture), "--output-root", str(output_root), "--resume", export_run.parent.name, "--set", "keyframes.stills=false"]
     assert main(["export", *args]) == 0
     assert main(["run", *args]) == 0
     assert (export_run / "stage_manifest.json").stat().st_mtime_ns == mtime

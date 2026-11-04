@@ -49,6 +49,7 @@ keyframes:
   max_gap_s: 1.0                 # longer without a trigger forces a keyframe
   jpeg_quality: 95
   prior_window: 3                # relative-rotation priors between keyframes up to this many apart
+  stills: true                   # the capture's full-quality reference JPEGs (~1 Hz) join the keyframes as a second camera (cam1)
 
 sfm:
   initial_camera_model: SIMPLE_RADIAL  # COLMAP model the mapper estimates; one camera per sequence image folder

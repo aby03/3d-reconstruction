@@ -289,7 +289,7 @@ def test_config():
 
 
 def _mesh_post(capture, root, *args):
-    return main(["mesh_post", "--input", str(capture), "--output-root", str(root), *args])
+    return main(["mesh_post", "--input", str(capture), "--output-root", str(root), "--set", "keyframes.stills=false", *args])
 
 
 def test_cli_skips(tiny_capture, output_root, mesh_post_run):

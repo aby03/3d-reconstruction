@@ -42,6 +42,7 @@ class KeyframeOptions:
     max_gap_s: float = 1.0  # a keyframe is forced when nothing triggered for this long
     jpeg_quality: int = 95
     prior_window: int = 3  # relative-rotation priors between keyframes up to this many apart
+    stills: bool = True  # the capture's full-quality reference JPEGs join the keyframes as a second camera
 
 
 @dataclass(slots=True)

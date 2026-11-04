@@ -110,6 +110,21 @@ def test_changed_key_reruns_only_keyframes(uniform, keyframes):
     assert len(list((seq_dir / "02_keyframes" / "images" / "cam0").iterdir())) == 15
 
 
+def test_stills_join_as_second_camera(tiny_capture, output_root, keyframes, tmp_path_factory):
+    root = tmp_path_factory.mktemp("stills")
+    shutil.copytree(output_root / "room2_tiny" / "sequences", root / "room2_tiny" / "sequences")
+    seq_dir = root / "room2_tiny" / "sequences" / keyframes[1].parent.name
+    assert _run(tiny_capture, root, "--set", "keyframes.stills=true") == 0
+    out = seq_dir / "02_keyframes"
+    table = read_csv(out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
+    stills = table[table["trigger"] == "still"]
+    assert len(stills) == 5 and stills["image_name"].str.contains("/cam1/").all()  # the tiny clip has 5 reference JPEGs
+    assert len(list((out / "images" / "cam1").iterdir())) == len(stills)
+    assert (table["trigger"] != "still").sum() == len(read_csv(keyframes[1] / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS))
+    gravity = read_csv(out / ARTIFACTS["gravity_priors"], GRAVITY_COLUMNS)
+    assert set(stills["image_name"]) <= set(gravity["image_name"])
+
+
 def test_uniform_selection(uniform):
     out = uniform[1] / "02_keyframes"
     table = read_csv(out / ARTIFACTS["keyframes"], KEYFRAMES_COLUMNS)
@@ -206,13 +221,13 @@ def test_cam_rotation_convention():
 
 def test_cli(tiny_capture, output_root, keyframes, tmp_path):
     manifest, out = keyframes
-    assert main(["keyframes", "--input", str(tiny_capture), "--output-root", str(output_root)]) == 0
+    assert main(["keyframes", "--input", str(tiny_capture), "--output-root", str(output_root), "--set", "keyframes.stills=false"]) == 0
     assert read_manifest(out) == manifest
     assert main(["keyframes", "--input", str(tiny_capture), "--output-root", str(tmp_path)]) == 1
 
 
 def _run(capture, root, *args):
-    return main(["run", "--input", str(capture), "--output-root", str(root), "--to", "keyframes", *args])
+    return main(["run", "--input", str(capture), "--output-root", str(root), "--to", "keyframes", "--set", "keyframes.stills=false", *args])
 
 
 def _last_run(root):
