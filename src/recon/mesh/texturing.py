@@ -31,10 +31,11 @@ class TextureOptions:
     virtual_face_images: int = 0
     sharpness_weight: float = 0.5
     patch_packing_heuristic: int = 3
+    seam_leveling: bool = True  # needs the patched OpenMVS build (patches/); an unpatched 2.4.0 turns textures black
 
 
 def texture_args(options: TextureOptions, device: int, mesh_rel: str, out_rel: str) -> list[str]:
-    """TextureMesh argv. Seam leveling is off (OpenMVS 2.4.0 turns textures black with it), and holes are neither
+    """TextureMesh argv. Seam leveling follows the option (OpenMVS 2.4.0 turns textures black with it unless patched), and holes are neither
     closed nor faces decimated, so the textured mesh has exactly the faces of the input mesh."""
     o = options
     items = [
@@ -48,8 +49,8 @@ def texture_args(options: TextureOptions, device: int, mesh_rel: str, out_rel: s
         "--virtual-face-images", o.virtual_face_images,
         "--sharpness-weight", o.sharpness_weight,
         "--patch-packing-heuristic", o.patch_packing_heuristic,
-        "--global-seam-leveling", 0,
-        "--local-seam-leveling", 0,
+        "--global-seam-leveling", int(o.seam_leveling),
+        "--local-seam-leveling", int(o.seam_leveling),
         "--close-holes", 0,
         "--decimate", 1,
         "--empty-color", EMPTY_COLOR,

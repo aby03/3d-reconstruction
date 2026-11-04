@@ -91,9 +91,10 @@ openmvs-configure = """cmake -S third_party/openMVS -B build/openmvs -G Ninja \
   -DOpenMVS_USE_PYTHON=OFF \
   -DOpenMVS_USE_BREAKPAD=OFF \
   -DOpenMVS_ENABLE_TESTS=OFF"""
+openmvs-patch = "git -C third_party/openMVS apply --check ../../patches/openmvs-seam-leveling.patch && git -C third_party/openMVS apply ../../patches/openmvs-seam-leveling.patch || echo patch already applied"
 openmvs-build = "cmake --build build/openmvs --parallel"
 openmvs-install = "cmake --install build/openmvs"
-openmvs = { depends-on = ["openmvs-configure", "openmvs-build", "openmvs-install"] }
+openmvs = { depends-on = ["openmvs-patch", "openmvs-configure", "openmvs-build", "openmvs-install"] }
 
 [environments]
 build = { features = ["build"], no-default-feature = true }
