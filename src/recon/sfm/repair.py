@@ -37,9 +37,11 @@ def _correspondences(
         matches = geometry.inlier_matches
         if matches is None or len(matches) == 0:
             continue
-        mine, theirs = (matches[:, 0], matches[:, 1]) if image.image_id < other_id else (matches[:, 1], matches[:, 0])
+        mine, theirs = matches[:, 0], matches[:, 1]  # columns follow the argument order
         points2D = other.points2D
         for k, l in zip(mine, theirs):
+            if k >= len(keypoints) or l >= len(points2D):
+                continue
             q = points2D[l]
             if not q.has_point3D():
                 continue

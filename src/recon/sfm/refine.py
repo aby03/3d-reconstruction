@@ -121,6 +121,8 @@ def polish(rec: pycolmap.Reconstruction, options: RefineOptions, use_gpu: bool =
     _bundle_adjust(rec, options.refine_principal_point, use_gpu, gpu_index)
     _filter(rec, options)
     _bundle_adjust(rec, options.refine_principal_point, use_gpu, gpu_index)
+    if not rec.compute_mean_reprojection_error() < options.max_reproj_px:  # a point pushed to a degenerate place
+        _filter(rec, options)
 
 
 def sanity_checks(rec: pycolmap.Reconstruction) -> list[str]:
