@@ -187,6 +187,62 @@ def plot_trajectory_topdown(
     return _save(fig, path)
 
 
+def plot_path_topdown(
+    centres: np.ndarray,
+    forward: np.ndarray,
+    groups: Sequence[str],
+    points: np.ndarray,
+    path: Path,
+    max_points: int = 40_000,
+    max_arrows: int = 120,
+    seed: int = 0,
+) -> Path:
+    """The walk seen from above: sparse points in grey, the camera path of the largest group (given in time order)
+    coloured from first to last, an arrow per camera along its viewing direction (every n-th camera, at most
+    `max_arrows`) and the other groups (e.g. stills) as small markers."""
+    centres, forward = np.asarray(centres, dtype=float), np.asarray(forward, dtype=float)
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    if len(points) > max_points:
+        points = points[np.random.default_rng(seed).choice(len(points), max_points, replace=False)]
+    if len(points):
+        lo, hi = np.percentile(points, [1, 99], axis=0)
+        points = points[((points >= lo) & (points <= hi)).all(axis=1)]
+    groups = np.asarray(groups)
+    labels = sorted(set(groups.tolist()))
+    main = max(labels, key=groups.tolist().count)
+    idx = np.flatnonzero(groups == main)
+    everything = np.concatenate([centres[:, :2], points[:, :2]]) if len(points) else centres[:, :2]
+    extent = float(np.max(everything.max(axis=0) - everything.min(axis=0))) or 1.0
+    arrow = 0.04 * extent
+    fig = Figure(figsize=(10, 9))
+    ax = fig.add_subplot(1, 1, 1)
+    if len(points):
+        ax.scatter(points[:, 0], points[:, 1], s=0.3, color="0.75", alpha=0.5)
+    ax.plot(centres[idx, 0], centres[idx, 1], lw=0.5, color="0.3", zorder=2)
+    order = np.linspace(0, 1, len(idx))
+    sc = ax.scatter(centres[idx, 0], centres[idx, 1], c=order, cmap="viridis", s=9, zorder=3)
+    pick = idx[:: max(1, len(idx) // max_arrows)]
+    ax.quiver(
+        centres[pick, 0], centres[pick, 1], forward[pick, 0], forward[pick, 1], color="tab:red", angles="xy",
+        scale_units="xy", scale=1 / arrow, width=0.002, zorder=4,
+    )
+    for group in labels:
+        if group != main:
+            other = np.flatnonzero(groups == group)
+            ax.scatter(centres[other, 0], centres[other, 1], s=10, marker="s", facecolors="none", edgecolors="tab:orange", label=f"{group} ({len(other)})", zorder=3)
+    ax.scatter(*centres[idx[0], :2], s=120, marker="o", facecolors="none", edgecolors="tab:green", linewidths=2, label="start", zorder=5)
+    ax.scatter(*centres[idx[-1], :2], s=120, marker="X", color="tab:red", label="end", zorder=5)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(f"camera path from above ({main}, {len(idx)} cameras; red arrows: viewing direction)")
+    ax.legend(loc="best", fontsize=8)
+    fig.colorbar(sc, ax=ax, shrink=0.6, label="time (first to last)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130)
+    return path
+
+
 def plot_cameras_3d(
     centres: np.ndarray,
     forward: np.ndarray,
