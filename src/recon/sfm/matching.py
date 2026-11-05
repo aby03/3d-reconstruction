@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import pandas as pd
 import pycolmap
 
 from recon.sfm.features import device
@@ -24,13 +25,13 @@ SIFT_VOCAB_TREE = (
 
 @dataclass(slots=True)
 class MatchingOptions:
-    strategy: Literal["auto", "sequential", "exhaustive"] = "auto"
-    exhaustive_max_images: int = 200  # auto: exhaustive up to this many images, else sequential
-    overlap: int = 20  # sequential: neighbours matched in name order
-    quadratic_overlap: bool = True  # sequential: also neighbours 2^k apart
+    strategy: Literal["auto", "time", "sequential", "exhaustive"] = "auto"
+    exhaustive_max_images: int = 200  # auto: exhaustive up to this many images, else time
+    overlap: int = 20  # time / sequential: neighbours matched (by capture time / in name order)
+    quadratic_overlap: bool = True  # time / sequential: also neighbours 2^k apart
     min_num_inliers: int = 15
     max_num_matches: int = 32768
-    loop_detection: bool = True  # sequential: also match each loop_detection_period-th image with similar ones
+    loop_detection: bool = True  # time / sequential: also match each loop_detection_period-th image with similar ones (time: and every image of the non-path cameras)
     loop_detection_period: int = 10
     loop_detection_num_images: int = 50
     vocab_tree_path: str | None = None  # None: COLMAP's SIFT tree, downloaded once into ~/.cache/colmap/
@@ -39,7 +40,7 @@ class MatchingOptions:
 def resolve_strategy(num_images: int, options: MatchingOptions) -> str:
     if options.strategy != "auto":
         return options.strategy
-    return "exhaustive" if num_images <= options.exhaustive_max_images else "sequential"
+    return "exhaustive" if num_images <= options.exhaustive_max_images else "time"
 
 
 def _cache_dir() -> Path:
@@ -79,6 +80,35 @@ def resolve_vocab_tree(path: str | None = None, spec: str = SIFT_VOCAB_TREE) -> 
     return cached
 
 
+def time_order(images: pd.DataFrame) -> list[str]:
+    """Image names ordered by sequence, then capture time (all cameras of a sequence interleaved by time; ties
+    keep the table order)."""
+    ordered = images.reset_index(drop=True).sort_values(["sequence_id", "t_ns"], kind="stable")
+    return ordered["image_name"].tolist()
+
+
+def time_pairs(names: list[str], overlap: int, quadratic: bool) -> list[tuple[str, str]]:
+    """Pairs of images that are neighbours in `names` (time order): each with the next `overlap` ones, and with
+    the ones 2^k further on when `quadratic`."""
+    offsets = set(range(1, overlap + 1))
+    if quadratic:
+        offsets |= {2**k for k in range(len(names).bit_length()) if 2**k < len(names)}
+    return sorted({(names[i], names[i + o]) for i in range(len(names)) for o in offsets if i + o < len(names)})
+
+
+def _query_images(images: pd.DataFrame, period: int) -> list[str]:
+    """Images that look for loop closures: every `period`-th image of the camera with most images in a sequence, and
+    every image of the other cameras (stills are few and each is worth anchoring)."""
+    names = []
+    for _, seq in images.groupby("sequence_id", sort=True):
+        group = seq["image_name"].map(lambda n: n.rsplit("/", 2)[1])
+        main = group.value_counts().index[0]
+        ordered = seq.assign(group=group).sort_values("t_ns", kind="stable")
+        path = ordered[ordered["group"] == main]["image_name"].tolist()
+        names += path[::period] + ordered[ordered["group"] != main]["image_name"].tolist()
+    return names
+
+
 def match_features(
     database: Path,
     num_images: int,
@@ -86,12 +116,17 @@ def match_features(
     use_gpu: bool = True,
     gpu_index: int = 0,
     vocab_tree: Path | None = None,
+    images: pd.DataFrame | None = None,
+    work_dir: Path | None = None,
 ) -> str:
     """Match and verify image pairs in `database`; returns the strategy used. Relative poses are always computed.
 
-    With `vocab_tree`, sequential matching also detects loops (`options.loop_detection*`).
+    `time` needs `images` (`image_name, sequence_id, t_ns`) and a `work_dir` for its pair lists; without them it
+    runs as `sequential`. With `vocab_tree`, `time` and `sequential` also detect loops (`options.loop_detection*`).
     """
     strategy = resolve_strategy(num_images, options)
+    if strategy == "time" and (images is None or work_dir is None):
+        strategy = "sequential"
     matching = pycolmap.FeatureMatchingOptions()
     matching.use_gpu = use_gpu
     matching.gpu_index = str(gpu_index)
@@ -103,6 +138,28 @@ def match_features(
         pycolmap.match_exhaustive(
             database, matching_options=matching, verification_options=verification, device=device(use_gpu)
         )
+    elif strategy == "time":
+        work_dir.mkdir(parents=True, exist_ok=True)
+        pairs = time_pairs(time_order(images), options.overlap, options.quadratic_overlap)
+        pair_file = work_dir / "time_pairs.txt"
+        pair_file.write_text("".join(f"{a} {b}\n" for a, b in pairs))
+        imported = pycolmap.ImportedPairingOptions()
+        imported.match_list_path = str(pair_file)
+        pycolmap.match_image_pairs(
+            database, matching_options=matching, pairing_options=imported, verification_options=verification,
+            device=device(use_gpu),
+        )
+        if vocab_tree is not None:
+            query_file = work_dir / "loop_queries.txt"
+            query_file.write_text("".join(f"{n}\n" for n in _query_images(images, options.loop_detection_period)))
+            tree = pycolmap.VocabTreePairingOptions()
+            tree.vocab_tree_path = str(vocab_tree)
+            tree.match_list_path = str(query_file)
+            tree.num_images = options.loop_detection_num_images
+            pycolmap.match_vocabtree(
+                database, matching_options=matching, pairing_options=tree, verification_options=verification,
+                device=device(use_gpu),
+            )
     else:
         pairing = pycolmap.SequentialPairingOptions()
         pairing.overlap = options.overlap

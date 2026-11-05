@@ -5,11 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pycolmap
-
-from recon.io.colmap import parse_image_name
-from recon.sfm.quality import camera_centres
 
 
 @dataclass(slots=True)
@@ -113,11 +109,22 @@ def refine(
     steps.append(_step("filter", rec))
     _bundle_adjust(rec, options.refine_principal_point, use_gpu, gpu_index)
     steps.append(_step("final_bundle_adjustment", rec))
+    if not rec.compute_mean_reprojection_error() < options.max_reproj_px:  # a point the BA pushed to a degenerate place
+        _filter(rec, options)
+        steps.append(_step("filter_after_final_bundle_adjustment", rec))
     return rec, steps, dropped
 
 
-def sanity_checks(rec: pycolmap.Reconstruction, max_jump: float = 10.0) -> list[str]:
-    """Warnings about implausible intrinsics and trajectory jumps (a keyframe step over `max_jump` x the median)."""
+def polish(rec: pycolmap.Reconstruction, options: RefineOptions, use_gpu: bool = True, gpu_index: int = 0) -> None:
+    """Bundle adjustment, outlier filter and a second bundle adjustment on an already refined model whose poses were
+    changed by hand."""
+    _bundle_adjust(rec, options.refine_principal_point, use_gpu, gpu_index)
+    _filter(rec, options)
+    _bundle_adjust(rec, options.refine_principal_point, use_gpu, gpu_index)
+
+
+def sanity_checks(rec: pycolmap.Reconstruction) -> list[str]:
+    """Warnings about implausible intrinsics."""
     warnings = []
     for camera_id, camera in sorted(rec.cameras.items()):
         size = max(camera.width, camera.height)
@@ -131,15 +138,4 @@ def sanity_checks(rec: pycolmap.Reconstruction, max_jump: float = 10.0) -> list[
         dy = abs(camera.principal_point_y - camera.height / 2) / camera.height
         if dx > 0.1 or dy > 0.1:
             warnings.append(f"camera {camera_id}: principal point outside the central 20% of the image")
-    by_sequence: dict[str, list[tuple[str, np.ndarray]]] = {}
-    for name, centre in camera_centres(rec).items():
-        by_sequence.setdefault(parse_image_name(name)[0], []).append((name, centre))
-    for sequence_id, cameras in by_sequence.items():
-        if len(cameras) < 3:
-            continue
-        steps = np.linalg.norm(np.diff([c for _, c in cameras], axis=0), axis=1)
-        median = np.median(steps)
-        jumps = [cameras[k + 1][0] for k in np.flatnonzero(steps > max_jump * median)]
-        if jumps:
-            warnings.append(f"{sequence_id}: trajectory jumps over {max_jump:g}x the median step at {', '.join(jumps)}")
     return warnings

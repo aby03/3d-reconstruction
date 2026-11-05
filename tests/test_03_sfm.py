@@ -15,6 +15,8 @@ from recon.pipeline.stages.s03_sfm import ARTIFACTS
 from recon.sfm.priors import PAIR_FILTER_COLUMNS
 
 REPORT_KEYS = {
+    "continuity",
+    "repair",
     "num_images_input",
     "num_registered",
     "registered_ratio",
@@ -254,3 +256,79 @@ def test_loop_detection(fallback):
     assert report["loop_detection"]["enabled"] != warned
     if report["loop_detection"]["enabled"]:
         assert Path(report["loop_detection"]["vocab_tree"]).is_file()
+
+
+def _fake_model(centres: dict[str, np.ndarray], rotations: dict[str, np.ndarray] | None = None):
+    """A stand-in for a pycolmap model: registered images with a camera centre and a cam_from_world rotation."""
+    from types import SimpleNamespace
+
+    rotations = rotations or {}
+
+    def image(i: int, name: str):
+        R = rotations.get(name, np.eye(3))
+        return SimpleNamespace(
+            name=name,
+            projection_center=lambda c=centres[name]: c,
+            cam_from_world=lambda R=R: SimpleNamespace(rotation=SimpleNamespace(matrix=lambda: R)),
+        )
+
+    images = {i: image(i, name) for i, name in enumerate(centres)}
+    return SimpleNamespace(images=images, reg_image_ids=lambda: list(images))
+
+
+def test_continuity_flags_displaced_cameras():
+    """A smooth path with one displaced video camera, one displaced still and one rotated camera: each is flagged,
+    the rest are not."""
+    import pandas as pd
+    from scipy.spatial.transform import Rotation
+
+    from recon.sfm.continuity import analyze
+    from recon.sfm.priors import GyroRotations
+
+    n = 60
+    rng = np.random.default_rng(0)
+    t = np.arange(n) * 0.2
+    path = np.stack([np.cos(t / 3), np.sin(t / 3), 0.1 * t], axis=1) + rng.normal(0, 1e-3, (n, 3))
+    names = [f"s/cam0/{i * 6:06d}.jpg" for i in range(n)]
+    centres = {name: path[i].copy() for i, name in enumerate(names)}
+    centres[names[30]] = centres[names[30]] + [0.0, 0.0, 3.0]  # displaced video camera
+    stills = {f"s/cam1/{i * 6:06d}.jpg": path[i] + rng.normal(0, 1e-3, 3) for i in range(5, n, 10)}
+    bad_still = "s/cam1/000246.jpg"
+    stills[bad_still] = path[41] + [2.0, 0.0, 0.0]
+    centres |= stills
+    rotations = {names[45]: Rotation.from_euler("z", 25, degrees=True).as_matrix()}
+    rows = [(nm, "s", int(nm.split("/")[-1][:-4]), int(t_i * 1e9)) for nm, t_i in zip(names, t)]
+    rows += [(nm, "s", int(nm.split("/")[-1][:-4]), int(t[int(nm.split("/")[-1][:-4]) // 6] * 1e9)) for nm in stills]
+    images = pd.DataFrame(rows, columns=["image_name", "sequence_id", "idx", "t_ns"])
+    quat = np.tile([0.0, 0.0, 0.0, 1.0], (n * 6, 1))  # a still gyro: every relative rotation is the identity
+    gyro = {"s": GyroRotations(R_cum=quat, R_cam_imu=np.eye(3))}
+    report = analyze(_fake_model(centres, rotations), images, gyro)
+    flagged = report["flagged"]
+    assert names[30] in flagged and "isolated" in flagged[names[30]]
+    assert bad_still in flagged and "still_offset" in flagged[bad_still]
+    assert names[45] in flagged and "rotation" in flagged[names[45]]
+    assert set(flagged) <= {names[29], names[30], names[31], names[44], names[45], names[46], bad_still}
+    clean = {k: v for k, v in centres.items() if k not in (names[30], bad_still)}
+    assert analyze(_fake_model(clean), images[images["image_name"].isin(clean)], gyro)["num_flagged"] == 0
+
+
+def test_time_pairs_follow_capture_time_across_cameras():
+    import pandas as pd
+
+    from recon.sfm.matching import _query_images, time_order, time_pairs
+
+    # a video camera every 6 frames and a still camera between them, names sorted cam0 < cam1 as in a real run
+    rows = [(f"s/cam0/{i * 6:06d}.jpg", "s", i * 100) for i in range(30)]
+    rows += [(f"s/cam1/{i * 6 * 5:06d}.jpg", "s", i * 100 * 5 + 50) for i in range(6)]
+    images = pd.DataFrame(rows, columns=["image_name", "sequence_id", "t_ns"])
+    order = time_order(images)
+    assert order[:3] == ["s/cam0/000000.jpg", "s/cam1/000000.jpg", "s/cam0/000006.jpg"]  # the still sits in time
+    pairs = set(time_pairs(order, overlap=3, quadratic=False))
+    assert ("s/cam1/000000.jpg", "s/cam0/000006.jpg") in pairs  # a still meets the video frames around it
+    assert ("s/cam0/000000.jpg", "s/cam1/000000.jpg") in pairs
+    assert all(a != b for a, b in pairs) and len(pairs) == len(set(pairs))
+    quad = set(time_pairs(order, overlap=3, quadratic=True))
+    assert len(quad) > len(pairs) and (order[0], order[8]) in quad
+    queries = _query_images(images, period=10)
+    assert queries[:3] == ["s/cam0/000000.jpg", "s/cam0/000060.jpg", "s/cam0/000120.jpg"]
+    assert sum("cam1" in q for q in queries) == 6  # every still is a query

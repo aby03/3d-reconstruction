@@ -59,9 +59,9 @@ sfm:
     max_image_size: 1920         # long side the images are scaled to for extraction
     domain_size_pooling: false   # true is better on low texture but forces COLMAP's CPU SIFT
   matching:
-    strategy: auto               # auto (exhaustive up to exhaustive_max_images, else sequential) | sequential | exhaustive
+    strategy: auto               # auto (exhaustive up to exhaustive_max_images, else time) | time (neighbours by capture time across all cameras) | sequential (name order) | exhaustive
     exhaustive_max_images: 200
-    overlap: 20                  # sequential: each keyframe is matched with the next `overlap` ones
+    overlap: 20                  # time / sequential: each image is matched with the next `overlap` ones (by capture time / name)
     quadratic_overlap: true      # sequential: and with the ones 2^k further on
     min_num_inliers: 15          # a pair is verified with at least this many inlier matches
     max_num_matches: 32768
@@ -90,6 +90,19 @@ sfm:
     min_track_len: 3             # points seen in fewer keyframes are removed
     min_tri_angle_deg: 1.5       # points with a smaller triangulation angle are removed
     min_image_obs: 15            # images observing fewer points are deregistered first (their pose is unconstrained)
+  continuity:                    # report-only: cameras close in time must be close in position and rotation (robust statistics of the capture itself)
+    enabled: true
+    k: 4.0                       # outlier: this many scaled MADs above the median ...
+    min_step_factor: 2.0         # ... and a step / offset longer than this many median steps
+    max_still_dt_s: 1.0          # a still is compared with the path camera nearest in time when within this
+    rotation_floor_deg: 3.0      # gyro-vs-SfM rotation step must also exceed this
+    gyro_max_dt_s: 1.0           # rotation steps are checked against the gyro up to this time gap
+  repair:                        # re-register cameras that several continuity checks flag; kept only when the model gets better
+    enabled: true
+    min_signals: 2               # independent checks that flag a camera
+    min_inliers: 30              # correspondences the new pose must explain
+    inlier_px: 4.0
+    gain: 1.2                    # the new pose needs this many times the inliers of the old one
 
 align:                           # world frame W: Z up, gravity -Z, floor z = 0, origin under the median camera
   gravity:

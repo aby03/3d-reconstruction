@@ -26,7 +26,9 @@ from recon.sfm.priors import (
     pair_rotation_errors,
     write_gravity_priors,
 )
-from recon.sfm.refine import refine, sanity_checks
+from recon.sfm.continuity import analyze as analyze_continuity, summary as continuity_summary
+from recon.sfm.refine import polish, refine, sanity_checks
+from recon.sfm.repair import repair
 from recon.sfm.quality import (
     camera_centres,
     gravity_spread,
@@ -115,11 +117,13 @@ def run_sfm(
         t0 = time.perf_counter()
         strategy = resolve_strategy(len(names), options.matching)
         vocab_tree = None
-        if strategy == "sequential" and options.matching.loop_detection:
+        if strategy in ("time", "sequential") and options.matching.loop_detection:
             vocab_tree = resolve_vocab_tree(options.matching.vocab_tree_path)
             if vocab_tree is None:
                 warnings.append("no vocab tree: loop detection is off")
-        strategy = match_features(database, len(names), options.matching, use_gpu, gpu_index, vocab_tree)
+        strategy = match_features(
+            database, len(names), options.matching, use_gpu, gpu_index, vocab_tree, inputs.images, out / "matching"
+        )
         num_pairs = num_verified_pairs(database)
         timings["matching"] = time.perf_counter() - t0
         log.info("%s matching: %d verified pairs in %.1f s", strategy, num_pairs, timings["matching"])
@@ -172,6 +176,38 @@ def run_sfm(
     warnings += sanity_warnings
     for warning in sanity_warnings:
         log.warning(warning)
+    continuity: dict[str, Any] = {"enabled": False}
+    if options.continuity.enabled:
+        continuity = analyze_continuity(rec, inputs.images, inputs.gyro, options.continuity)
+        log.info("pose continuity: %s", continuity_summary(continuity))
+        if continuity["num_flagged"]:
+            warnings.append(
+                f"pose continuity: {continuity['num_flagged']} image(s) out of step with their time neighbours"
+                f" ({continuity['num_flagged_strong']} by two or more checks)"
+            )
+            log.warning(warnings[-1])
+    repair_report: dict[str, Any] = {"enabled": options.repair.enabled, "kept": False, "records": []}
+    if options.repair.enabled and continuity.get("num_flagged_strong"):
+        candidate = pycolmap.Reconstruction(rec)
+        repair_report["records"] = repair(candidate, database, continuity["flagged"], options.repair)
+        applied = [r["image"] for r in repair_report["records"] if r["applied"]]
+        if applied:
+            polish(candidate, options.refine, use_gpu, gpu_index)
+            after = analyze_continuity(candidate, inputs.images, inputs.gyro, options.continuity)
+            before_err, after_err = rec.compute_mean_reprojection_error(), candidate.compute_mean_reprojection_error()
+            better = after["num_flagged"] < continuity["num_flagged"] and after["num_flagged_strong"] <= continuity["num_flagged_strong"]
+            keep = better and after_err <= 1.1 * before_err and candidate.num_reg_images() >= rec.num_reg_images()
+            repair_report.update(
+                kept=keep, flagged_before=continuity["num_flagged"], flagged_after=after["num_flagged"],
+                reproj_before=before_err, reproj_after=after_err,
+            )
+            log.info(
+                "repaired %d image(s): flagged %d -> %d, reprojection %.3f -> %.3f px, %s",
+                len(applied), continuity["num_flagged"], after["num_flagged"], before_err, after_err,
+                "kept" if keep else "discarded",
+            )
+            if keep:
+                rec, continuity = candidate, after
     log.info(
         "refined model: %d images, %d points, %.3f px (raw %.3f px) in %.1f s",
         rec.num_reg_images(),
@@ -216,6 +252,8 @@ def run_sfm(
             "dropped_images": dropped,
             "sanity_warnings": sanity_warnings,
         },
+        "continuity": continuity,
+        "repair": repair_report,
         "unregistered_images": stats["unregistered_images"],
         "per_image": per_image_stats(rec),
         "backend": backend,
