@@ -127,10 +127,10 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
   undistort:
     max_image_size: -1           # -1: full resolution (1080x1920 keyframes -> 1043x1857 PINHOLE)
   openmvs:
-    resolution_level: 1          # images scaled down by 2^level before patch match ...
+    resolution_level: 0          # images scaled down by 2^level before patch match ... (level 0: full-resolution views, 3x the time of level 1)
     min_resolution: 640          #   ... but the long side never below this (level 2 = level 1 on 1857 px images)
     max_resolution: 2560
-    number_views: 6              # neighbour views per depth map (tiny: 6 -> 70 s, 8 + iters 4 -> 101 s)
+    number_views: 8              # neighbour views per depth map (tiny: 6 -> 70 s, 8 + iters 4 -> 101 s)
     number_views_fuse: 3         # a fused point needs this many agreeing depth maps
     fusion_filter: 1             # depth-map fusion filter (OpenMVS default 2 keeps ~4.7x fewer points on room2)
     sub_resolution_levels: 2
@@ -142,8 +142,8 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     bin_dir: null                # null: OpenMVS from PATH (pixi adds .local/openmvs/bin/OpenMVS)
   filter:                        # outlier removal on the dense cloud before ReconstructMesh (the mesh is cropped to the box before RefineMesh)
     enabled: true
-    roi:                         # drop points outside the dense span of each axis (same box as mesh_post.roi)
-      enabled: true
+    roi:                         # drop points outside the dense span of each axis (same box as mesh_post.roi); off: keep the whole scene
+      enabled: false
       bin_frac: 0.005
       min_density_frac: 0.15
       margin_frac: 0.01
@@ -162,11 +162,19 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     min_inlier_ratio: 0.5
     max_median_residual: 0.05    # warn above this median relative residual in a view
     edge_rel: 0.05               # depth jumps above this fraction of the depth have no confidence
+    mesh_fit: true               # refit scale/shift to the OpenMVS mesh depth (ray cast into the view); the SfM fit stays when the mesh covers too little or disagrees with the SfM points
+    mesh_min_frac: 0.05          # the mesh must cover this share of the view's pixels
+    mesh_trim: 0.7               # share of covered pixels (closest to the fit) used in each refit step
+    mesh_max_rel: 0.3            # pixels whose fitted and mesh inverse depth differ by more than this fraction are outliers
+    local_correction: true       # smooth per-view correction of the inverse depth towards the mesh, so patches meet the mesh without a step
+    local_cell_px: 32            # correction grid cell, pixels of the network output
+    local_clip: 0.25             # the correction changes the inverse depth by at most this fraction
+    local_prior_pixels: 20.0     # a cell needs about this many mesh pixels for its full correction
   fusion:                        # TSDF of the fitted mono depth (Open3D, CPU) -> mesh_tsdf.ply, the gap filler merged in mesh_post
     enabled: true
     tau: null                    # geometry tolerance; null = as mesh_post (0.005 * diag in arbitrary units, 0.02 in metres)
-    voxel_tau: 0.5               # voxel size in tau
-    trunc_tau: 4.0               # truncation distance in tau
+    voxel_tau: 0.8               # voxel size in tau (~diagonal / 256)
+    trunc_tau: 4.8               # truncation distance in tau (6 voxels)
     max_depth_frac: 0.7          # depths beyond this fraction of the diagonal are not integrated
     min_inlier_ratio: 0.7        # only views whose SfM fit is at least this good are fused ...
     max_residual: 0.05           # ... and whose median relative residual is at most this
@@ -181,11 +189,12 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
   refine:                        # RefineMesh -> mesh_refined.ply (disabled or timed out: a copy of mesh_raw.ply)
     enabled: true
     use_cuda: false              # true: follows device.preference (room2: CPU 16.7 min, CUDA 20.3 min + 3.2 GB VRAM)
-    resolution_level: 1
+    resolution_level: 0          # refine against full-resolution views
+    decimate: 1.0                # 1: RefineMesh keeps every face (unset it auto-decimates and loses detail)
     max_face_area: 16            # faces larger than this (px, in any image pair) are subdivided
     scales: 2
     regularity_weight: 0.2       # photo-consistency vs smoothness (higher: flatter walls)
-    max_minutes: 45              # killed after this; the raw mesh is kept
+    max_minutes: 240             # killed after this; the raw mesh is kept
   preview:                       # TextureMesh at low resolution into preview/ (seam leveling off)
     enabled: true
     resolution_level: 2
@@ -193,8 +202,8 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
 
 mesh_post:                       # step 6: clean, fill small holes, flatten planes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
   input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)
-  roi:                           # crop to the span where the dense points are dense (room2: drops the stray +y trail)
-    enabled: true
+  roi:                           # crop to the span where the dense points are dense (tuned on one capture, cut hotel1 badly); off: keep the whole scene
+    enabled: false
     bin_frac: 0.005
     min_density_frac: 0.15
     margin_frac: 0.01
@@ -206,9 +215,12 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
   cleanup:
     min_component_frac: 0.005    # drop components with fewer faces than this fraction (room2: 17 -> 1 components)
     min_component_diam_frac: 0.02  # ... or smaller than this fraction of the bbox diagonal
+    below_floor_frac: 0.015      # drop faces this fraction of the room height below the floor (mirror images in glossy floors); 0: keep
   fill:                          # add the TSDF (mono depth) patches that lie in gaps of the OpenMVS mesh (textureless walls, ceiling, floor), after cleanup
     enabled: true
-    gap_tau: 3.0                 # a TSDF face is in a gap when its centroid is farther than this many tau from the mesh
+    normal_test: false           # true: gap = no mesh surface within distance_voxels along the TSDF face normal (room2: 137% area added, 52 components); false: centroid farther than gap_tau from the mesh
+    distance_voxels: 1.5         # reach of the normal test, in TSDF voxels
+    gap_tau: 3.0                 # (normal_test false) a TSDF face is in a gap when its centroid is farther than this many tau from the mesh
     min_area_frac: 0.005         # a connected patch is added when its area is at least this share of the mesh area
     overlap_tau: 2.0             # patches grow by this many tau beyond gap_tau, so they overlap the mesh
     weld: false                  # drop the mesh faces under a patch's overlap and join the mesh to the patch along the cut
@@ -236,8 +248,24 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     straighten_edges: true
     max_snap_move_factor: 1.5
     smooth_nonplanar: true       # Taubin, 5 steps, vertices off the planes only
+    fill_patch_weight: 0.5       # gap-fill patches (mono depth) count this much in plane detection, so they cannot tilt a plane
+    bend_removal: false          # move the vertices of a bent wall onto its plane; off until scored against the dense points
+    wave_cell_frac: 0.008        # bend grid cell, fraction of the diagonal
+    relief_tol_frac: 0.0015      # a vertex this far from the smoothed bend is relief (a frame, a shelf) and stays
+    relief_min_frac: 0.005       # relief pieces smaller than this are noise
+    bend_max_tau: 6.0            # no vertex moves further than this many tau
+  plane_fill:                    # flat patches over enclosed holes of walls/floor/ceiling unless the keyframes see through them; off until scored
+    enabled: false
+    cell_frac: 0.004             # raster cell, fraction of the diagonal
+    min_plane_area_frac: 0.02
+    max_hole_frac: 0.15          # larger holes are openings
+    close_cells: 1
+    see_through_tau: 3.0         # a view sees through a cell when its depth exceeds the plane's by this many tau ...
+    in_front_tau: 3.0            # ... and a surface in front of it when smaller by this many tau
+    min_votes: 2
+    max_rejected_frac: 0.3
   decimate:
-    texture_face_budget: 600000  # quadric decimation above this many faces (room2 refined: 728k -> 600k, 3.5 s)
+    texture_face_budget: 2000000 # quadric decimation above this many faces (600k before: coarse on 1080p stills)
     planar_quadric: true
   texture:                       # TextureMesh; seam leveling needs the patched OpenMVS build (unpatched 2.4.0: 41% black texels on tiny)
     resolution_level: 0          # full-resolution keyframes (tiny: 9 s, one 4096^2 atlas; level 1: 8 s, 2048^2)
@@ -255,7 +283,8 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     jpeg_quality: 95             # PNG would be 4.3x the bytes (tiny 6.9 vs 1.6 MB)
     fill_k: 8                    # dense points averaged per face
 
-export:                          # step 7: model.glb (Y up, textures embedded) + obj/ (Z up) + metadata.json
+export:                          # step 7: model.glb (Y up, textures embedded) + model_preview.glb + obj/ (Z up) + metadata.json
+  preview_faces: 300000          # model_preview.glb: textured mesh decimated to this many faces (0: none)
   glb:
     double_sided: true           # room interiors are seen from inside
 

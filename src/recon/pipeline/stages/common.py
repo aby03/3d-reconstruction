@@ -24,7 +24,8 @@ def open_loader(
     info = read_json(stage_dir(sequence_dir, s01_ingest.DIR_NAME) / s01_ingest.ARTIFACTS["sequence"])
     if info["source_type"] != SOURCE_TYPE:
         raise ValueError(f"unsupported source type {info['source_type']!r}")
-    options = LoaderOptions(verify_reference_jpegs=False, decode_backend=decode_backend)
+    # ingest already checked the frame count (and accepted a mismatch only when asked to), so later steps trust it
+    options = LoaderOptions(verify_reference_jpegs=False, allow_mismatch=True, decode_backend=decode_backend)
     return OpenCameraSensorsLoader(info["root"], options, gpu_index)
 
 

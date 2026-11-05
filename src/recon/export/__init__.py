@@ -9,3 +9,4 @@ class GlbOptions:
 @dataclass(slots=True)
 class ExportOptions:
     glb: GlbOptions = field(default_factory=GlbOptions)
+    preview_faces: int = 300000  # model_preview.glb: the textured mesh decimated to this many faces (0: none)

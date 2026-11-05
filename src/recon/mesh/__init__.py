@@ -7,6 +7,7 @@ from recon.mesh.decimate import DecimateOptions
 from recon.mesh.fill import FillOptions
 from recon.mesh.holes import HoleOptions
 from recon.mesh.merge import MergeOptions
+from recon.mesh.plane_fill import PlaneFillOptions
 from recon.mesh.planes import PlaneOptions
 from recon.mesh.roi import RoiOptions
 from recon.mesh.texture_fix import TextureFixOptions
@@ -23,6 +24,7 @@ class MeshPostOptions:
     consistency: ConsistencyOptions = field(default_factory=ConsistencyOptions)
     holes: HoleOptions = field(default_factory=HoleOptions)
     planes: PlaneOptions = field(default_factory=PlaneOptions)
+    plane_fill: PlaneFillOptions = field(default_factory=PlaneFillOptions)
     decimate: DecimateOptions = field(default_factory=DecimateOptions)
     texture: TextureOptions = field(default_factory=TextureOptions)
     texture_fix: TextureFixOptions = field(default_factory=TextureFixOptions)

@@ -187,6 +187,67 @@ def plot_trajectory_topdown(
     return _save(fig, path)
 
 
+def plot_cameras_3d(
+    centres: np.ndarray,
+    forward: np.ndarray,
+    groups: Sequence[str],
+    points: np.ndarray,
+    path: Path,
+    max_points: int = 40_000,
+    max_arrows: int = 80,
+    seed: int = 0,
+) -> Path:
+    """The model in 3D, Z up: sparse points coloured by height, the camera path (the largest group, in order) and an arrow per camera
+    along its viewing direction (every n-th camera, at most `max_arrows`), cameras coloured by `groups` (e.g. the
+    camera model: video frames or stills). Left an oblique view, right the view from above."""
+    centres, forward = np.asarray(centres, dtype=float), np.asarray(forward, dtype=float)
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    if len(points) > max_points:
+        points = points[np.random.default_rng(seed).choice(len(points), max_points, replace=False)]
+    if len(points):
+        lo, hi = np.percentile(points, [1, 99], axis=0)
+        points = points[((points >= lo) & (points <= hi)).all(axis=1)]
+    everything = np.concatenate([centres, points]) if len(points) else centres
+    low, high = everything.min(axis=0), everything.max(axis=0)
+    extent = float(np.max(high - low)) or 1.0
+    step = max(1, len(centres) // max_arrows)
+    arrow = 0.06 * extent
+    labels = sorted(set(groups))
+    colors = {g: f"C{i}" for i, g in enumerate(labels)}
+    fig = Figure(figsize=(14, 6.5))
+    ax3 = fig.add_subplot(1, 2, 1, projection="3d")
+    ax2 = fig.add_subplot(1, 2, 2)
+    if len(points):
+        ax3.scatter(*points.T, c=points[:, 2], cmap="Greys", s=0.3, alpha=0.5)
+        ax2.scatter(points[:, 0], points[:, 1], c=points[:, 2], cmap="Greys", s=0.3, alpha=0.4)
+    path_group = max(labels, key=list(groups).count)  # the path joins the largest group (the video), not the stills
+    track = centres[np.asarray(groups) == path_group]
+    ax3.plot(*track.T, lw=0.6, color="black")
+    ax2.plot(track[:, 0], track[:, 1], lw=0.6, color="black")
+    for group in labels:
+        idx = np.flatnonzero(np.asarray(groups) == group)
+        pick = idx[::step]
+        ax3.scatter(*centres[idx].T, s=6, color=colors[group], label=f"{group} ({len(idx)})")
+        ax2.scatter(centres[idx, 0], centres[idx, 1], s=6, color=colors[group], label=f"{group} ({len(idx)})")
+        ax3.quiver(*centres[pick].T, *(forward[pick] * arrow).T, color=colors[group], linewidth=0.8, arrow_length_ratio=0.3)
+        ax2.quiver(
+            centres[pick, 0], centres[pick, 1], forward[pick, 0], forward[pick, 1], color=colors[group],
+            angles="xy", scale_units="xy", scale=1 / arrow, width=0.002,
+        )
+    ax3.scatter(*centres[0], s=60, facecolors="none", edgecolors="tab:green", label="first")
+    ax2.plot(*centres[0, :2], "o", ms=9, mfc="none", color="tab:green")
+    ax3.set_box_aspect(np.maximum(high - low, 1e-9))
+    ax3.view_init(elev=28, azim=-60)
+    for ax, title in ((ax3, "oblique view (arrows: viewing direction)"), (ax2, "from above")):
+        ax.set_title(title)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+    ax3.set_zlabel("z (up)")
+    ax2.set_aspect("equal")
+    ax3.legend(loc="upper left")
+    return _save(fig, path)
+
+
 def plot_height_histogram(
     z: np.ndarray, floor_z: float | None, camera_z: np.ndarray, path: Path, bins: int = 200
 ) -> Path:

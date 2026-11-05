@@ -17,6 +17,7 @@ from recon.export import ExportOptions
 from recon.export.cameras import transforms_json, validate_transforms, write_colmap_text
 from recon.export.gltf import validate_glb, write_glb
 from recon.export.manifest import file_entry, write_metadata
+from recon.export.preview import write_preview_glb
 from recon.export.obj import OBJ_NAME, validate_obj, write_obj
 from recon.export.ply import validate_stl, validate_vertex_color_ply, write_stl, write_vertex_color_ply
 from recon.io.ply import read_mesh
@@ -33,6 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 
 ARTIFACTS = {
     "glb": "model.glb",
+    "glb_preview": "model_preview.glb",
     "obj": f"obj/{OBJ_NAME}",
     "mtl": "obj/model.mtl",
     "textures": "obj/textures",
@@ -113,6 +115,11 @@ def run_export(
     glb = out / ARTIFACTS["glb"]
     write_glb(textured_obj, glb, options.glb)
     glb_info = validate_glb(glb, faces, bounds_w, diag)
+    preview_info = None
+    if options.preview_faces:
+        preview = out / ARTIFACTS["glb_preview"]
+        preview_faces = write_preview_glb(textured_obj, preview, options.preview_faces, options.glb)
+        preview_info = validate_glb(preview, preview_faces, bounds_w, diag)
     timings["glb"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -153,6 +160,8 @@ def run_export(
         ARTIFACTS["vertex_color_ply"]: file_entry(vertex_color, "+Z", vertex_color_info),
         ARTIFACTS["stl"]: file_entry(stl, "+Z", stl_info),
     }
+    if preview_info:
+        files[ARTIFACTS["glb_preview"]] = file_entry(out / ARTIFACTS["glb_preview"], "+Y", preview_info)
     for key in ("sparse_ply", "dense_ply", "transforms"):
         files[ARTIFACTS[key]] = file_entry(out / ARTIFACTS[key], "+Z")
     for key in ("colmap", "colmap_undistorted", "trajectory"):
@@ -220,4 +229,5 @@ class ExportStage(Stage):
         )
 
     def expected_artifacts(self) -> list[Path]:
-        return [self.out / rel for rel in ARTIFACTS.values()]
+        skip = {"glb_preview"} if not self.options.preview_faces else set()
+        return [self.out / rel for key, rel in ARTIFACTS.items() if key not in skip]

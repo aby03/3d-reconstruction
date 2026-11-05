@@ -33,10 +33,10 @@ OOM_PATTERN = r"CUDA_ERROR_OUT_OF_MEMORY|out of memory|cudaErrorMemoryAllocation
 
 @dataclass(slots=True)
 class OpenMvsOptions:
-    resolution_level: int = 1  # images scaled down by 2^level before patch match ...
+    resolution_level: int = 0  # images scaled down by 2^level before patch match ...
     min_resolution: int = 640  # ... but the long side never below this
     max_resolution: int = 2560
-    number_views: int = 6
+    number_views: int = 8
     number_views_fuse: int = 3
     fusion_filter: int = 1  # depth-map fusion filter of DensifyPointCloud (OpenMVS default 2 keeps far fewer points)
     sub_resolution_levels: int = 2
@@ -61,11 +61,12 @@ class MeshOptions:
 class RefineOptions:
     enabled: bool = True
     use_cuda: bool = False  # True: follows the backend (room2: CPU 16.7 min, CUDA 20.3 min, same mesh)
-    resolution_level: int = 1
+    resolution_level: int = 0
+    decimate: float = 1.0  # 1: keep every face (OpenMVS's default auto-decimates)
     max_face_area: int = 16
     scales: int = 2
     regularity_weight: float = 0.2
-    max_minutes: float = 45.0  # killed after this; the raw mesh is kept
+    max_minutes: float = 240.0  # killed after this; the raw mesh is kept
 
 
 @dataclass(slots=True)
@@ -163,6 +164,7 @@ def refine_mesh_args(options: RefineOptions, device: int, mesh: str = MESH_PLY) 
     return _argv(
         "-w", ".", "-i", SCENE_DENSE, "-m", mesh, "-o", REFINED_PLY,
         "--resolution-level", o.resolution_level,
+        "--decimate", o.decimate,
         "--max-face-area", o.max_face_area,
         "--scales", o.scales,
         "--regularity-weight", o.regularity_weight,

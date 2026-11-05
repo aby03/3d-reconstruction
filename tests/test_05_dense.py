@@ -200,7 +200,7 @@ def test_mono(dense_run, report, aligned):
 def test_fusion(dense_run, report):
     fusion = report["fusion"]
     assert fusion["enabled"] and fusion["views"] == report["mono"]["fitted"] and fusion["skipped_views"] == 0
-    assert np.isclose(fusion["voxel"] * 2, fusion["truncation"] / 4) and np.isclose(fusion["tau"], 0.005 * report["diag"])
+    assert np.isclose(fusion["truncation"] / fusion["voxel"], 6) and np.isclose(fusion["tau"], 0.005 * report["diag"])
     assert fusion["faces"] > 50_000 and 0 < fusion["faces_in_box"] <= fusion["faces"]  # measured 315k, 289k
     mesh = trimesh.load(dense_run / FUSION_ARTIFACTS["mesh_tsdf"], process=False, force="mesh")
     assert len(mesh.faces) == fusion["faces_in_box"]
@@ -379,3 +379,25 @@ def test_refine_disabled(no_refine):
     assert report["refine"]["faces"] == report["mesh_raw"]["faces"] and report["preview"] == {"enabled": False}
     assert report["hardware"] is None
     assert (no_refine.parent / "config.resolved.yaml").read_text().startswith("# hardware preset: none\n")
+
+
+def test_mono_fit_to_mesh():
+    """A tilted wall in a ray-cast mesh gives back the scale and shift the disparity was made with."""
+    import open3d as o3d
+
+    from recon.dense.mono import MonoOptions, ViewFit, fit_to_mesh, mesh_depth
+
+    K, T = np.array([[100, 0, 70], [0, 100, 39], [0, 0, 1.0]]), np.eye(4)
+    wall = trimesh.creation.box(extents=[40, 40, 0.1])
+    wall.apply_transform(trimesh.transformations.rotation_matrix(0.6, [0, 1, 0]))
+    wall.apply_translation([0, 0, 6])
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(
+        o3d.core.Tensor(np.asarray(wall.vertices), o3d.core.float32), o3d.core.Tensor(np.asarray(wall.faces), o3d.core.uint32)
+    )
+    z = mesh_depth(scene, K, T, (78, 140))
+    assert (z > 0).all()
+    disparity = (0.8 / z + 0.2).astype(np.float32)  # 1/z = 1.25 d - 0.25
+    fit, correction = fit_to_mesh(disparity, ViewFit(1.0, 0.0, 100, 90, 0.9, 0.01, 0.02, True), z, MonoOptions())
+    assert fit.mesh_used and np.isclose(fit.scale, 1.25, atol=1e-3) and np.isclose(fit.shift, -0.25, atol=1e-3)
+    assert correction is not None and np.allclose(correction, 1.0, atol=1e-3)

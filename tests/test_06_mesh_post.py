@@ -308,3 +308,27 @@ def test_cli_needs_dense(tiny_capture, output_root, align_run, tmp_path, capsys)
     shutil.copy(run_dir / "run_manifest.json", copy)
     assert _mesh_post(tiny_capture, tmp_path, "--resume", run_dir.name) == 1
     assert "run `recon dense` first" in capsys.readouterr().out
+
+
+def test_plane_fill_closes_an_enclosed_hole(tmp_path):
+    """A square hole in a floor raster is filled with flat faces; nothing is added where there is no hole."""
+    from recon.mesh.plane_fill import PlaneFillOptions, fill_plane_holes
+    from recon.mesh.planes import Plane
+
+    n = 60
+    xs = np.linspace(-5, 5, n + 1)
+    X, Y = np.meshgrid(xs, xs)
+    vertices = np.c_[X.ravel(), Y.ravel(), np.zeros(X.size)]
+    faces = []
+    for i in range(n):
+        for j in range(n):
+            a = i * (n + 1) + j
+            if not (25 <= i < 30 and 25 <= j < 30):
+                faces += [[a, a + 1, a + n + 2], [a, a + n + 2, a + n + 1]]
+    src, out = tmp_path / "floor.ply", tmp_path / "filled.ply"
+    trimesh.Trimesh(vertices, faces, process=False).export(src)
+    floor = [Plane(0, "floor", [0, 0, 1.0], 0.0, 100.0, 1.0, len(faces), 0.0, 0.0, 0.0)]
+    report = fill_plane_holes(src, out, floor, [], 0.05, 14.0, PlaneFillOptions(enabled=True))
+    filled = trimesh.load(out, process=False, force="mesh")
+    assert report["holes"] == report["holes_filled"] == 1 and report["cells_added"] > 100
+    assert len(filled.faces) == len(faces) + 2 * report["cells_added"] and np.allclose(filled.vertices[:, 2], 0)

@@ -186,3 +186,18 @@ def test_cli_keeps_finished_ingest(tiny_capture, output_root, ingest):
     run_dir = sorted((output_root / "room2_tiny" / "runs").iterdir())[-1]
     assert (run_dir / "logs" / "pipeline.log").is_file() and (run_dir / "config.resolved.yaml").is_file()
     assert [s["status"] for s in read_json(run_dir / "run_manifest.json")["stages"]] == ["skipped"]
+
+
+def test_frame_timing_matches_extra_timestamps_by_video_time():
+    from recon.capture.timing import check_frame_timing
+
+    jitter = np.random.default_rng(0).normal(0, 2e-4, 103)  # a real clock is not perfectly even
+    pts = (np.arange(100) / 60.0 + jitter[:100])
+    stamps = ((np.arange(103) / 60.0 + jitter) * 1e9).astype(np.int64) + 5_000_000_000
+    check = check_frame_timing(pts, stamps)  # extra timestamps at the end
+    assert check.ok and check.t_offset == 0 and check.num_frames == 100
+    check = check_frame_timing(pts, stamps[1:101])  # one extra at the start of a shifted list
+    assert check.num_frames == 100
+    with pytest.raises(ValueError):
+        check_frame_timing(pts, stamps[:90])
+    assert not check_frame_timing(pts, stamps[:90], allow_mismatch=True).ok

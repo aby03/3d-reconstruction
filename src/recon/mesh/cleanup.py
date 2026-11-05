@@ -12,6 +12,7 @@ import pymeshlab
 class CleanupOptions:
     min_component_frac: float = 0.005  # components with fewer faces than this fraction go ...
     min_component_diam_frac: float = 0.02  # ... and those smaller than this fraction of the bbox diagonal
+    below_floor_frac: float = 0.015  # faces whose corners lie lower than this fraction of the room height below the floor (z = 0) are mirror images in glossy floors; 0: keep
 
 
 @dataclass(slots=True)
@@ -53,9 +54,11 @@ def cleanup(
     out: Path,
     options: CleanupOptions | None = None,
     bounds: tuple[np.ndarray, np.ndarray] | None = None,
+    floor_depth: float | None = None,
 ) -> CleanupResult:
     """Clean the mesh `src` into the PLY `out`, in this order: duplicate vertices and faces, zero-area faces,
-    unreferenced vertices, faces with a corner outside the `bounds` box (min, max) when given, non-manifold edges
+    unreferenced vertices, faces with a corner outside the `bounds` box (min, max) when given, faces with a corner
+    more than `floor_depth` below the floor plane z = 0 when given, non-manifold edges
     (their faces removed) and vertices (split), then components below
     `min_component_frac` of the faces or `min_component_diam_frac` of the bbox diagonal."""
     options = options or CleanupOptions()
@@ -71,6 +74,11 @@ def cleanup(
             f"({a}{k} < {float(lo[i])!r} || {a}{k} > {float(hi[i])!r})" for i, a in enumerate("xyz") for k in range(3)
         )
         ms.compute_selection_by_condition_per_face(condselect=outside)
+        ms.meshing_remove_selected_vertices_and_faces()
+        ms.meshing_remove_unreferenced_vertices()
+    if floor_depth:
+        low = " || ".join(f"z{k} < {-float(floor_depth)!r}" for k in range(3))
+        ms.compute_selection_by_condition_per_face(condselect=low)
         ms.meshing_remove_selected_vertices_and_faces()
         ms.meshing_remove_unreferenced_vertices()
     ms.meshing_repair_non_manifold_edges(method=0)

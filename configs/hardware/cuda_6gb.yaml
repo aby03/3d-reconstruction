@@ -1,3 +1,3 @@
-# 4-10 GB VRAM (GTX 1660 Ti 6 GB). At 1080p keyframes OpenMVS peaks below 0.4 GB; these values are about time.
+# 4-10 GB VRAM (GTX 1660 Ti 6 GB). At 1080p keyframes OpenMVS peaks below 0.4 GB; the full-resolution views (level 0, 8 views) cost time, not memory.
 dense:
-  openmvs: {resolution_level: 1, min_resolution: 640, number_views: 6, number_views_fuse: 3, sub_resolution_levels: 2}
+  openmvs: {resolution_level: 0, min_resolution: 640, number_views: 8, number_views_fuse: 3, sub_resolution_levels: 2}

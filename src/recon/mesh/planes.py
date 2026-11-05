@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pymeshlab
 import scipy.sparse as sp
+from scipy import ndimage
 import trimesh
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
@@ -39,6 +41,12 @@ class PlaneOptions:
     straighten_edges: bool = True
     max_snap_move_factor: float = 1.5
     smooth_nonplanar: bool = True
+    fill_patch_weight: float = 0.5  # fill patches (mono depth) count this much in plane detection, so they cannot tilt a plane
+    bend_removal: bool = False  # move the vertices of a bent wall onto its plane (see `_remove_bend`)
+    wave_cell_frac: float = 0.008  # bend grid cell, as a fraction of the diagonal
+    relief_tol_frac: float = 0.0015  # a vertex this far (fraction of the diagonal) from the smoothed bend is relief and stays
+    relief_min_frac: float = 0.005  # relief pieces smaller than this (fraction of the diagonal) are noise
+    bend_max_tau: float = 6.0  # no vertex moves further than this many tau
 
 
 @dataclass(slots=True)
@@ -122,14 +130,17 @@ def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def detect_planes(
-    mesh: trimesh.Trimesh, tau: float, options: PlaneOptions | None = None
+    mesh: trimesh.Trimesh, tau: float, options: PlaneOptions | None = None, weights: np.ndarray | None = None
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
     """Planes of `mesh` as dicts (`normal`, `d`, `direction`, `axis_angle_deg`, `label`, `area`) and the plane index
     of every face (-1: none). Candidates are the offset peaks along ±Z and the wall directions; each keeps its faces
     with normal within `normal_tol_deg` and offset within tau, split into face-connected regions (small ones
-    dropped), refit by SVD and snapped onto the direction when within `manhattan_snap_deg`."""
+    dropped), refit by SVD and snapped onto the direction when within `manhattan_snap_deg`. `weights` (one per face)
+    scale the area each face counts for in the detection; the reported plane areas are the real ones."""
     options = options or PlaneOptions()
-    normals, area, centres = mesh.face_normals, mesh.area_faces, mesh.triangles_center
+    normals, centres = mesh.face_normals, mesh.triangles_center
+    real_area = mesh.area_faces
+    area = real_area * (np.ones(len(real_area)) if weights is None else weights)
     total = float(area.sum())
     min_area = options.min_plane_area_frac * total
     cos_tol = np.cos(np.radians(options.normal_tol_deg))
@@ -173,7 +184,7 @@ def detect_planes(
     planes = _merge(planes, mesh, area, tau, options)
     for i, plane in enumerate(planes):
         labels[plane["faces"]] = i
-        plane["area"] = float(area[plane["faces"]].sum())
+        plane["area"] = float(real_area[plane["faces"]].sum())
     _label(planes, tau)
     return planes, labels
 
@@ -316,11 +327,101 @@ def _rms(points: np.ndarray, normal: np.ndarray, d: float) -> float:
     return float(np.sqrt(np.mean((points @ normal - d) ** 2))) if len(points) else 0.0
 
 
+def _patch_weights(mesh: trimesh.Trimesh, patch: Path | None, weight: float) -> np.ndarray | None:
+    """Per-face weights: `weight` for the faces that are also faces of the mesh in `patch` (matched by centroid), else 1."""
+    if patch is None or weight == 1.0 or not patch.is_file():
+        return None
+    other = read_mesh(patch)
+    if not len(other.faces):
+        return None
+    dist = cKDTree(other.triangles_center).query(mesh.triangles_center)[0]
+    return np.where(dist < 1e-6 * max(float(np.ptp(mesh.bounds, axis=0).max()), 1.0), weight, 1.0)
+
+
+def _remove_bend(
+    mesh: trimesh.Trimesh, vertices: np.ndarray, vnormals: np.ndarray, new: np.ndarray, kind: np.ndarray,
+    planes: list[dict], tau: float, diag: float, options: PlaneOptions,
+) -> int:  # fmt: skip
+    """Move onto its plane every vertex facing the plane within `bend_max_tau` that the snap left alone because the
+    surface is bent away from the plane: the bend is the offset to the plane smoothed over cells of `wave_cell_frac` of the diagonal
+    (median per cell, then blurred); a vertex within `relief_tol_frac` of the bend follows it back to the plane, one
+    further away is relief (a frame, a shelf) and stays, unless its piece of relief is smaller than
+    `relief_min_frac`. Vertices of two planes (edges, corners) and moves above `bend_max_tau` are left. `new` and
+    `kind` are updated in place; returns the vertices moved."""
+    cell = options.wave_cell_frac * diag
+    tol = options.relief_tol_frac * diag
+    owners = np.zeros(len(vertices), int)  # structural planes a vertex belongs to (edges and corners: more than one)
+    for plane in planes:
+        if plane["label"] in ("floor", "wall", "ceiling"):
+            owners[np.unique(mesh.faces[plane["faces"]])] += 1
+    cos_tol = np.cos(np.radians(options.normal_tol_deg))
+    moved = 0
+    for plane in planes:
+        if plane["label"] not in ("floor", "wall", "ceiling"):
+            continue
+        n = np.asarray(plane["normal"])
+        offset_all = vertices @ n - plane["d"]
+        region = np.flatnonzero((np.abs(offset_all) <= options.bend_max_tau * tau) & (vnormals @ n > cos_tol))
+        offset = offset_all[region]
+        near = np.ones(len(region), bool)
+        if near.sum() < 10:
+            continue
+        helper = np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+        u = np.cross(n, helper)
+        u /= np.linalg.norm(u)
+        v = np.cross(n, u)
+        uv = np.stack([vertices[region] @ u, vertices[region] @ v], axis=1)
+        ij = np.floor((uv - uv[near].min(axis=0)) / cell).astype(int)
+        shape = tuple(ij[near].max(axis=0) + 1)
+        inside = near & (ij < np.array(shape)).all(axis=1) & (ij >= 0).all(axis=1)
+        flat = np.ravel_multi_index(ij[inside].T, shape)
+        grid, weight = np.zeros(shape), np.zeros(shape)
+        medians = pd.Series(offset[inside]).groupby(flat).median()
+        i, j = np.unravel_index(medians.index.to_numpy(), shape)
+        grid[i, j], weight[i, j] = medians.to_numpy(), 1.0
+        blur_w = ndimage.gaussian_filter(weight, 1.0)
+        wave = ndimage.gaussian_filter(grid, 1.0) / np.maximum(blur_w, 1e-9)
+        bend = np.zeros(len(region))
+        bend[inside] = wave[ij[inside, 0], ij[inside, 1]]
+        relief = inside & (np.abs(offset - bend) > tol)
+        if relief.any():  # small pieces of relief are noise
+            local = {int(g): i for i, g in enumerate(region)}
+            rel_set = set(region[relief].tolist())
+            edges = mesh.edges_unique
+            pick = np.array([a in rel_set and b in rel_set for a, b in edges], bool)
+            if pick.any():
+                sub = edges[pick]
+                graph = sp.coo_matrix((np.ones(len(sub)), (sub[:, 0], sub[:, 1])), shape=(len(vertices),) * 2)
+                labels = connected_components(graph, directed=False)[1]
+                members = region[relief]
+                for label in np.unique(labels[members]):
+                    group = members[labels[members] == label]
+                    if np.ptp(vertices[group], axis=0).max() < options.relief_min_frac * diag:
+                        relief[[local[int(g)] for g in group]] = False
+        movable = inside & ~relief
+        ids = region[movable]
+        ids = ids[owners[ids] <= 1]
+        if not len(ids):
+            continue
+        dist = vertices[ids] @ n - plane["d"]
+        new[ids] = vertices[ids] - np.outer(dist, n)
+        kind[ids] = 1
+        moved += len(ids)
+    return moved
+
+
 def regularize(
-    src: Path, out: Path, tau: float, options: PlaneOptions | None = None
+    src: Path,
+    out: Path,
+    tau: float,
+    options: PlaneOptions | None = None,
+    patch: Path | None = None,
+    diag: float | None = None,
 ) -> tuple[dict[str, Any], list[Plane]]:
-    """Detect the planes of the mesh `src`, snap their vertices (straightening edges and corners), Taubin-smooth the
-    rest and write the PLY `out`; a copy of `src` when disabled. Returns the report and the planes."""
+    """Detect the planes of the mesh `src` (the faces of the mesh in `patch`, the gap fill, count
+    `fill_patch_weight`), snap their vertices (straightening edges and corners), remove the bend of the walls when
+    `bend_removal` (needs `diag`), Taubin-smooth the rest and write the PLY `out`; a copy of `src` when disabled.
+    Returns the report and the planes."""
     options = options or PlaneOptions()
     if not options.enabled:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -328,9 +429,10 @@ def regularize(
         return {"enabled": False, "tau": tau}, []
     mesh = read_mesh(src)
     vertices = np.asarray(mesh.vertices, dtype=float)
-    found, _ = detect_planes(mesh, tau, options)
+    found, _ = detect_planes(mesh, tau, options, _patch_weights(mesh, patch, options.fill_patch_weight))
     new, snap = _snap(vertices, _unit(mesh.vertex_normals), mesh, found, tau, options)
     kind = snap["kind"]
+    bent = _remove_bend(mesh, vertices, _unit(mesh.vertex_normals), new, kind, found, tau, diag, options) if options.bend_removal and diag else 0
     moved = kind > 0
     if options.smooth_nonplanar:
         boundary = np.zeros(len(vertices), bool)
@@ -385,6 +487,7 @@ def regularize(
         "corners": {"points": snap["corners"], "vertices": int((planar & (kind == 3)).sum())},
         "wall_rms_max": max((p.rms_after for p in walls), default=None),
         "flipped_faces": flipped,
+        "bend_removed": bent,
     }
     return report, planes
 

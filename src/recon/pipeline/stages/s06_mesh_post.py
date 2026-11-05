@@ -24,6 +24,7 @@ from recon.mesh.consistency import ConsistencyView, remove_free_space
 from recon.mesh.holes import fill_holes
 from recon.mesh.fill import fill_gaps
 from recon.mesh.merge import merge_unsupported
+from recon.mesh.plane_fill import fill_plane_holes
 from recon.mesh.planes import regularize, write_planes
 from recon.mesh.roi import room_bounds
 from recon.mesh.texture_fix import fix_textures
@@ -60,6 +61,8 @@ ARTIFACTS = {
     "textured_fixed_mtl": "textured_fixed/mesh.mtl",
     "report": "reports/mesh_report.json",
 }
+# written only when the fill added patches / the plane fill is on
+OPTIONAL_ARTIFACTS = {"mesh_fill_patch": "mesh_fill_patch.ply", "mesh_plane_filled": "mesh_plane_filled.ply"}
 INPUTS = {"refined": "mesh_refined", "raw": "mesh_raw"}
 
 
@@ -123,17 +126,22 @@ def run_mesh_post(
 
     t0 = time.perf_counter()
     bounds = room_bounds(dense_points, dense["diag"], options.roi) if options.roi.enabled else None
-    cleaned = cleanup(cleanup_src, out / ARTIFACTS["mesh_clean"], options.cleanup, bounds)
+    height = float(np.subtract(*np.percentile(dense_points[:, 2], [99.5, 0.5])))
+    floor_depth = options.cleanup.below_floor_frac * height
+    cleaned = cleanup(cleanup_src, out / ARTIFACTS["mesh_clean"], options.cleanup, bounds, floor_depth)
     merge["output_faces"] = cleaned.before["faces"]
     timings["cleanup"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    for rel in OPTIONAL_ARTIFACTS.values():  # from an earlier run
+        (out / rel).unlink(missing_ok=True)
     fill: dict[str, Any] = {"enabled": options.fill.enabled and tsdf.is_file()}
     if fill["enabled"]:
         # the room box of the dense stage: the density-based `bounds` stop short of the sparsely seen ceiling
         room = dense.get("filter", {}).get("box")
         fill_box = (np.array(room["min"]), np.array(room["max"])) if room else bounds
-        fill.update(fill_gaps(out / ARTIFACTS["mesh_clean"], tsdf, out / ARTIFACTS["mesh_filled"], t, options.fill, fill_box))
+        fill.update(fill_gaps(out / ARTIFACTS["mesh_clean"], tsdf, out / ARTIFACTS["mesh_filled"], t, options.fill, fill_box, dense.get("fusion", {}).get("voxel"),
+                              out / OPTIONAL_ARTIFACTS["mesh_fill_patch"]))
     else:
         shutil.copyfile(out / ARTIFACTS["mesh_clean"], out / ARTIFACTS["mesh_filled"])
     timings["fill"] = time.perf_counter() - t0
@@ -167,7 +175,8 @@ def run_mesh_post(
 
     t0 = time.perf_counter()
     planes_report, planes = regularize(
-        out / ARTIFACTS["mesh_consistent"], out / ARTIFACTS["mesh_regularized"], t, options.planes
+        out / ARTIFACTS["mesh_consistent"], out / ARTIFACTS["mesh_regularized"], t, options.planes,
+        out / OPTIONAL_ARTIFACTS["mesh_fill_patch"], dense["diag"],
     )
     write_planes(out / ARTIFACTS["planes"], planes)
     if planes_report["enabled"]:
@@ -176,8 +185,22 @@ def run_mesh_post(
     timings["planes"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    plane_fill: dict[str, Any] = {"enabled": False}
+    if options.plane_fill.enabled and planes and fits.is_file():
+        c = options.consistency
+        views = s05_dense.load_mono_views(dense_dir, pd.read_csv(fits), c.min_inlier_ratio, c.max_residual)
+        plane_fill = fill_plane_holes(
+            out / ARTIFACTS["mesh_regularized"], out / OPTIONAL_ARTIFACTS["mesh_plane_filled"], planes,
+            [ConsistencyView(*v) for v in views], t, dense["diag"], options.plane_fill,
+        )
+        decimate_src = out / OPTIONAL_ARTIFACTS["mesh_plane_filled"]
+    else:
+        decimate_src = out / ARTIFACTS["mesh_regularized"]
+    timings["plane_fill"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     decimated = decimate(
-        out / ARTIFACTS["mesh_regularized"], out / ARTIFACTS["mesh_final_geometry"], options.decimate
+        decimate_src, out / ARTIFACTS["mesh_final_geometry"], options.decimate
     )
     timings["decimate"] = time.perf_counter() - t0
 
@@ -265,6 +288,7 @@ def run_mesh_post(
         "cleanup": dataclasses.asdict(cleaned),
         "holes": holes,
         "planes": planes_report,
+        "plane_fill": plane_fill,
         "decimate": {**decimated, "budget": options.decimate.texture_face_budget},
         "final": final,
         "texture": {
@@ -298,7 +322,7 @@ def run_mesh_post(
         100 * qa["p95_frac"],
     )
     return StageOutput(
-        artifacts=dict(ARTIFACTS),
+        artifacts=ARTIFACTS | {k: rel for k, rel in OPTIONAL_ARTIFACTS.items() if (out / rel).is_file()},
         metrics={
             "final_faces": final["faces"],
             "untextured_face_frac": untextured,

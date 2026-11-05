@@ -28,7 +28,10 @@ def output_root(tmp_path_factory) -> Path:
 def pipeline_run(tiny_capture, output_root) -> RunContext:
     """ingest → keyframes on the tiny clip through the runner, once per session; later steps read its stage dirs.
     The config is the CLI's: the defaults with the hardware preset picked for this machine."""
-    overrides = [f"run.output_root={output_root}", "keyframes.stills=false"]  # the later steps are checked on one camera
+    # the later steps are checked on one camera, with the room-extent crops on (off by default) so that they stay tested
+    overrides = [
+        f"run.output_root={output_root}", "keyframes.stills=false", "dense.filter.roi.enabled=true", "mesh_post.roi.enabled=true",
+    ]
     hardware = resolve_hardware("auto", overrides=overrides)
     ctx = open_run(tiny_capture, load_config(overrides=overrides, hardware=hardware or "none"), SCENE, None, hardware)
     result = run_stages(ctx, select_stages(to="keyframes"))

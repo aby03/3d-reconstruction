@@ -17,8 +17,8 @@ BLOCK_CAPACITY = 100_000  # blocks the grid starts with (it grows)
 class FusionOptions:
     enabled: bool = True
     tau: float | None = None  # geometry tolerance; None: as mesh_post (0.5% of the diagonal, 2 cm in metres)
-    voxel_tau: float = 0.5  # voxel size, in tau
-    trunc_tau: float = 4.0  # truncation distance, in tau
+    voxel_tau: float = 0.8  # voxel size, in tau
+    trunc_tau: float = 4.8  # truncation distance, in tau
     max_depth_frac: float = 0.7  # depths beyond this fraction of the diagonal are not integrated
     min_inlier_ratio: float = 0.7  # only views whose fit to the SfM points is at least this good are fused
     max_residual: float = 0.05  # ... and whose median relative residual is at most this

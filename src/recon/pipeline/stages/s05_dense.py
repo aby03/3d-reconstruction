@@ -11,6 +11,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import open3d as o3d
 import pandas as pd
 import pycolmap
 import trimesh
@@ -32,7 +33,9 @@ from recon.dense.openmvs import (
 )
 from recon.dense.filter import filter_points
 from recon.dense.fusion import FusionOptions, FusionView, fuse
-from recon.dense.mono import MonoDepth, MonoOptions, ViewFit, fetch_model, fit_view, fitted_depth
+from recon.dense.mono import (
+    MonoDepth, MonoOptions, ViewFit, fetch_model, fit_to_mesh, fit_view, fitted_depth, median_rel_residual, mesh_depth,
+)
 from recon.dense.undistort import undistort
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
 from recon.io.ply import mesh_stats, read_mesh, read_openmvs_points, select_openmvs_points, write_points
@@ -90,7 +93,7 @@ MONO_ARTIFACTS = {
 }
 PREVIEW_DIR = "preview"
 MONO_COLUMNS = ["image", "points", "inliers", "inlier_ratio", "median_rel_residual", "median_rel_residual_all",
-                "scale", "shift", "fitted", "reason"]
+                "scale", "shift", "fitted", "reason", "mesh_used", "mesh_pixels_frac", "mesh_median_rel_residual"]
 
 
 def inside_frac(xyz: np.ndarray, box: tuple[np.ndarray, np.ndarray]) -> float:
@@ -165,11 +168,37 @@ def _view_points(rec: pycolmap.Reconstruction, image: pycolmap.Image) -> tuple[n
     return uv[z > 0], z[z > 0]
 
 
+def _mesh_scene(path: Path) -> o3d.t.geometry.RaycastingScene:
+    mesh = read_mesh(path)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(
+        o3d.core.Tensor(np.asarray(mesh.vertices), o3d.core.float32), o3d.core.Tensor(np.asarray(mesh.faces), o3d.core.uint32)
+    )
+    return scene
+
+
+def _view_camera(rec: pycolmap.Reconstruction, image: pycolmap.Image, shape: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    """Intrinsics at the size `shape` = (h, w) and the 4x4 cam_from_world of an undistorted (PINHOLE) view."""
+    cam = rec.cameras[image.camera_id]
+    fx, fy, cx, cy = cam.params
+    sx, sy = shape[1] / cam.width, shape[0] / cam.height
+    T = np.eye(4)
+    T[:3] = image.cam_from_world().matrix()
+    return np.array([[fx * sx, 0, cx * sx], [0, fy * sy, cy * sy], [0, 0, 1]]), T
+
+
 def _run_mono(
-    rec: pycolmap.Reconstruction, images_dir: Path, out: Path, options: MonoOptions, use_cuda: bool
+    rec: pycolmap.Reconstruction,
+    images_dir: Path,
+    out: Path,
+    options: MonoOptions,
+    use_cuda: bool,
+    mesh: Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Mono depth of every keyframe of the undistorted model `rec`, fitted to its SfM points; the fitted depth
+    """Mono depth of every keyframe of the undistorted model `rec`, fitted to its SfM points and, with `mesh` (and
+    `options.mesh_fit`), refitted to the mesh depth with a smooth local correction; the fitted depth
     and confidence of each view that fits go to `out/mono/<image>.npz`. Returns the summary and one row per view."""
+    scene = _mesh_scene(mesh) if mesh is not None and options.mesh_fit else None
     t0 = time.perf_counter()
     model, source = fetch_model(options)
     net = MonoDepth(model, use_cuda, options)
@@ -182,9 +211,21 @@ def _run_mono(
         uv, z = _view_points(rec, image)
         h, w = bgr.shape[:2]
         fit = fit_view(disparity, uv * np.array([disparity.shape[1] / w, disparity.shape[0] / h]), z, options)
+        correction = None
+        if scene is not None and fit.fitted:
+            scaled = uv * np.array([disparity.shape[1] / w, disparity.shape[0] / h])
+            K, T = _view_camera(rec, image, disparity.shape)
+            refit, correction = fit_to_mesh(disparity, fit, mesh_depth(scene, K, T, disparity.shape), options)
+            # the mesh must not pull the view away from the SfM points
+            worst = max(2 * fit.median_rel_residual, options.inlier_rel)
+            if refit.mesh_used and median_rel_residual(disparity, scaled, z, refit.scale, refit.shift) > worst:
+                fit.mesh_pixels_frac = refit.mesh_pixels_frac
+                correction = None
+            else:
+                fit = refit
         fits[image.name] = fit
         if fit.fitted:
-            depth, confidence = fitted_depth(disparity, fit, options)
+            depth, confidence = fitted_depth(disparity, fit, options, correction)
             write_npz(
                 out / MONO_ARTIFACTS["mono"] / Path(image.name).with_suffix(".npz"),
                 True,
@@ -204,6 +245,7 @@ def _run_mono(
         "input_long_side": options.input_long_side,
         "views": len(fits),
         "fitted": len(fitted),
+        "mesh_fitted": sum(f.mesh_used for f in fitted),
         "skipped": {n: f.reason for n, f in fits.items() if not f.fitted},
         "median_rel_residual": {"median": float(np.median(res)), "max": float(res.max())} if len(res) else None,
         "inlier_ratio": {"median": float(np.median(ratio)), "min": float(ratio.min())} if len(ratio) else None,
@@ -366,7 +408,7 @@ def run_dense(
     t0 = time.perf_counter()
     mono_report, mono_rows = {"enabled": False}, []
     if options.mono.enabled:
-        mono_report, mono_rows = _run_mono(urec, undistorted_dir / "images", out, options.mono, backend == "cuda")
+        mono_report, mono_rows = _run_mono(urec, undistorted_dir / "images", out, options.mono, backend == "cuda", refined_ply)
         write_csv(pd.DataFrame(mono_rows), out / MONO_ARTIFACTS["mono_fit"], MONO_COLUMNS)
         artifacts.update(MONO_ARTIFACTS)
     timings["mono"] = time.perf_counter() - t0

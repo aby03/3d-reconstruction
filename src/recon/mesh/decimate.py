@@ -12,7 +12,7 @@ QUALITY_THRESHOLD = 0.3  # pymeshlab's qualitythr: penalizes collapses that crea
 
 @dataclass(slots=True)
 class DecimateOptions:
-    texture_face_budget: int = 600_000  # decimate only meshes with more faces
+    texture_face_budget: int = 2_000_000  # decimate only meshes with more faces
     planar_quadric: bool = True  # planar regions collapse to few triangles
 
 

@@ -173,7 +173,7 @@ class OpenCameraSensorsLoader(BaseCaptureLoader):
             checks["warnings"].append(f"frame timing check failed: {checks['frame_timing']}")
             log.warning(checks["warnings"][-1])
         n = timing.num_frames
-        frame_t_ns = frame_t_ns[:n]
+        frame_t_ns = frame_t_ns[timing.t_offset : timing.t_offset + n]
 
         rotation_deg = (-probe.display_rotation) % 360
         w, h = probe.stored_size

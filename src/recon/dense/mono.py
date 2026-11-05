@@ -12,6 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 import onnxruntime as ort
+import open3d as o3d
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,14 @@ class MonoOptions:
     min_inlier_ratio: float = 0.5
     max_median_residual: float = 0.05  # a fit above this median relative residual is a warning
     edge_rel: float = 0.05  # depth jumps above this fraction of the depth between neighbour pixels have no confidence
+    mesh_fit: bool = True  # refit scale and shift to the depth of the OpenMVS mesh ray-cast into the view (the SfM fit stays when the mesh covers too little or disagrees with the SfM points)
+    mesh_min_frac: float = 0.05  # the mesh must cover this share of the view's pixels
+    mesh_trim: float = 0.7  # share of the covered pixels (the closest to the fit) used in each refit step
+    mesh_max_rel: float = 0.3  # pixels whose fitted and mesh inverse depth differ by more than this fraction are outliers
+    local_correction: bool = True  # smooth per-view correction of the inverse depth towards the mesh, so a patch meets the mesh without a step
+    local_cell_px: int = 32  # correction grid cell (pixels of the network output)
+    local_clip: float = 0.25  # the correction changes the inverse depth by at most this fraction
+    local_prior_pixels: float = 20.0  # a cell needs about this many mesh pixels for its full correction
 
 
 @dataclass(slots=True)
@@ -55,6 +64,9 @@ class ViewFit:
     median_rel_residual_all: float  # of every point
     fitted: bool
     reason: str | None = None  # why the view was skipped
+    mesh_used: bool = False  # scale and shift were refitted to the mesh depth
+    mesh_pixels_frac: float = 0.0  # share of the view's pixels the mesh covers
+    mesh_median_rel_residual: float = float("nan")  # of the pixels used, after the refit
 
 
 def cache_dir(options: MonoOptions) -> Path:
@@ -175,10 +187,94 @@ def fit_view(
     return fit
 
 
-def fitted_depth(disparity: np.ndarray, fit: ViewFit, options: MonoOptions) -> tuple[np.ndarray, np.ndarray]:
+def median_rel_residual(disparity: np.ndarray, uv: np.ndarray, depth: np.ndarray, scale: float, shift: float) -> float:
+    """Median relative depth error of the fit `1/z = scale * d + shift` at the pixels `uv` against the depths `depth`."""
+    h, w = disparity.shape
+    d = disparity[np.clip(np.round(uv[:, 1]).astype(int), 0, h - 1), np.clip(np.round(uv[:, 0]).astype(int), 0, w - 1)]
+    inv = scale * d + shift
+    ok = inv > MIN_DISPARITY
+    return float(np.median(np.abs(1.0 / inv[ok] - depth[ok]) / depth[ok])) if ok.any() else float("inf")
+
+
+def mesh_depth(scene: Any, K: np.ndarray, cam_from_world: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Depth along z (float32, 0 where no surface) of the mesh in the Open3D raycasting scene `scene`, seen from the
+    camera (`K` at the size `shape` = (h, w), 4x4 `cam_from_world`)."""
+    h, w = shape
+    v, u = np.mgrid[0:h, 0:w]
+    pix = np.stack([(u - K[0, 2]) / K[0, 0], (v - K[1, 2]) / K[1, 1], np.ones_like(u, float)], -1).reshape(-1, 3)
+    world_from_cam = np.linalg.inv(cam_from_world)
+    d = pix @ world_from_cam[:3, :3].T
+    d /= np.linalg.norm(d, axis=1, keepdims=True)
+    rays = np.concatenate([np.broadcast_to(world_from_cam[:3, 3], d.shape), d], axis=1)
+    t = scene.cast_rays(o3d.core.Tensor(rays, o3d.core.float32))["t_hit"].numpy().astype(float)
+    z = np.where(np.isfinite(t), t / np.linalg.norm(pix, axis=1), 0.0)
+    return z.reshape(h, w).astype(np.float32)
+
+
+def fit_to_mesh(
+    disparity: np.ndarray, fit: ViewFit, z_mesh: np.ndarray, options: MonoOptions
+) -> tuple[ViewFit, np.ndarray | None]:
+    """Refit scale and shift of the view to the mesh depth `z_mesh` (h, w; 0 = no surface) by trimmed least squares in
+    inverse depth, starting from the SfM fit, and a smooth multiplicative correction of the inverse depth (h, w), or
+    None. The returned fit is `fit` itself when the mesh covers less than `mesh_min_frac` of the view or the refit
+    gives a non-positive scale."""
+    hit = z_mesh > 0
+    fit.mesh_pixels_frac = float(hit.mean())
+    if not fit.fitted or fit.mesh_pixels_frac < options.mesh_min_frac:
+        return fit, None
+    d, inv_mesh = disparity[hit].astype(float), 1.0 / z_mesh[hit].astype(float)
+    scale, shift = fit.scale, fit.shift
+    for _ in range(5):
+        inv = scale * d + shift
+        err = np.abs(inv - inv_mesh) / inv_mesh
+        keep = err <= np.quantile(err, options.mesh_trim)
+        if keep.sum() < 2:
+            return fit, None
+        A = np.stack([d[keep], np.ones(int(keep.sum()))], axis=1)
+        scale, shift = np.linalg.lstsq(A, inv_mesh[keep], rcond=None)[0]
+    if scale <= 0:
+        return fit, None
+    inv = scale * d + shift
+    err = np.abs(inv - inv_mesh) / np.maximum(inv_mesh, MIN_DISPARITY)
+    inliers = (inv > MIN_DISPARITY) & (err < options.mesh_max_rel)
+    refit = ViewFit(
+        float(scale), float(shift), fit.points, fit.inliers, fit.inlier_ratio, fit.median_rel_residual,
+        fit.median_rel_residual_all, True, None, True, fit.mesh_pixels_frac,
+        float(np.median(err[inliers])) if inliers.any() else float("nan"),
+    )
+    correction = None
+    if options.local_correction and inliers.any():
+        correction = _local_correction(hit, inliers, np.log(inv_mesh[inliers] / inv[inliers]), options)
+    return refit, correction
+
+
+def _local_correction(hit: np.ndarray, inliers: np.ndarray, log_ratio: np.ndarray, options: MonoOptions) -> np.ndarray:
+    """exp of the smoothed log ratio mesh / fitted inverse depth: a per-cell mean of the pixels with a mesh surface,
+    smoothed by normalised convolution (cells without mesh pixels fade to 1), clipped to +-`local_clip`."""
+    h, w = hit.shape
+    cell = options.local_cell_px
+    gh, gw = -(-h // cell), -(-w // cell)
+    v, u = np.nonzero(hit)
+    index = (v[inliers] // cell) * gw + (u[inliers] // cell)
+    total = np.bincount(index, log_ratio, gh * gw).reshape(gh, gw)
+    count = np.bincount(index, minlength=gh * gw).reshape(gh, gw).astype(float)
+    total, count = (cv2.GaussianBlur(a, (0, 0), 1.0) for a in (total, count))
+    mean = total / np.maximum(count, 1e-9)
+    mean *= count / (count + options.local_prior_pixels)
+    limit = np.log1p(options.local_clip)
+    grid = np.clip(mean, -limit, limit).astype(np.float32)
+    return np.exp(cv2.resize(grid, (w, h), interpolation=cv2.INTER_LINEAR))
+
+
+def fitted_depth(
+    disparity: np.ndarray, fit: ViewFit, options: MonoOptions, correction: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """Metric-consistent (SfM units) depth (float32, 0 where the fit is not positive) and a uint8 confidence
-    mask (1 away from depth jumps, 0 on them and where there is no depth) from a fitted view."""
+    mask (1 away from depth jumps, 0 on them and where there is no depth) from a fitted view; the inverse depth is
+    multiplied by `correction` when given."""
     inv = fit.scale * disparity + fit.shift
+    if correction is not None:
+        inv = inv * correction
     depth = np.where(inv > MIN_DISPARITY, 1.0 / np.maximum(inv, MIN_DISPARITY), 0.0).astype(np.float32)
     ok = depth > 0
     gy, gx = np.gradient(depth)

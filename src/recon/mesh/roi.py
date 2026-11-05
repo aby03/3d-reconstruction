@@ -8,7 +8,7 @@ import numpy as np
 
 @dataclass(slots=True)
 class RoiOptions:
-    enabled: bool = True
+    enabled: bool = False  # the span is tuned per capture: off keeps the whole scene
     bin_frac: float = 0.005  # histogram bin size, as a fraction of the diagonal
     min_density_frac: float = 0.15  # a bin is dense above this fraction of the typical bin count
     margin_frac: float = 0.01  # padding around the dense span, as a fraction of the diagonal

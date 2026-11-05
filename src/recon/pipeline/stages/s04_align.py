@@ -47,6 +47,7 @@ ARTIFACTS = {
     "plot_gravity": "reports/plots/gravity_residuals.png",
     "plot_height": "reports/plots/height_hist.png",
     "plot_trajectory": "reports/plots/trajectory_topdown.png",
+    "plot_cameras_3d": "reports/plots/cameras_3d.png",
     "plot_yaw": "reports/plots/yaw_hist.png",
 }
 
@@ -85,6 +86,12 @@ def _write_plots(
         points[:, 2], 0.0 if floor_detected else None, centres[:, 2], out / ARTIFACTS["plot_height"]
     )
     plots.plot_trajectory_topdown(centres, points, out / ARTIFACTS["plot_trajectory"], axes="xy")
+    images = sorted((rec.images[i] for i in rec.reg_image_ids()), key=lambda im: im.name)
+    forward = np.array([im.cam_from_world().rotation.matrix()[2] for im in images])  # camera z axis in the world
+    plots.plot_cameras_3d(
+        np.array([im.projection_center() for im in images]), forward, [f"camera {im.camera_id}" for im in images], points,
+        out / ARTIFACTS["plot_cameras_3d"],
+    )
     histogram = np.asarray(manhattan["histogram"] or np.zeros(90))
     plots.plot_yaw_histogram(histogram, manhattan["yaw_deg"], manhattan["applied"], out / ARTIFACTS["plot_yaw"])
 
