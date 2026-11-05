@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 class MapperOptions:
     backend: Literal["global", "incremental"] = "global"
     fallback: bool = True  # retry when too few images register: global without gravity, then incremental
+    retry_on_jumps: bool = True  # global mapping that leaves jumps in the camera path: also map incrementally, keep the better
     min_registered_ratio: float = 0.8  # an attempt registering fewer than this fraction of the images falls back
 
 

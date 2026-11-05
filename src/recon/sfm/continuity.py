@@ -25,6 +25,7 @@ class ContinuityOptions:
     max_still_dt_s: float = 1.0  # a still is compared with the path camera nearest in time when it is this close
     rotation_floor_deg: float = 3.0  # a gyro disagreement also needs to exceed this
     gyro_max_dt_s: float = 1.0  # rotation steps are checked against the gyro up to this time gap
+    gap_factor: float = 5.0  # a step longer than this many times the 95th-percentile step is a jump on its own
 
 
 def _scale(x: np.ndarray) -> tuple[float, float]:
@@ -80,7 +81,7 @@ def analyze(
         med_ls, mad_ls = _scale(log_speed)
         z = np.full(len(d), np.nan)
         z[ok] = (np.log(np.maximum(d[ok], 1e-12) / dt[ok]) - med_ls) / mad_ls
-        jump = (z > options.k) & (d > options.min_step_factor * step_med)
+        jump = ((z > options.k) & (d > options.min_step_factor * step_med)) | (d > options.gap_factor * np.percentile(d, 95))
         out["median_step"], out["median_speed"] = step_med, float(np.exp(med_ls))
         out["jumps"] = [
             {"from": names[i], "to": names[i + 1], "dist": float(d[i]), "dt_s": float(dt[i]), "z": float(z[i])}

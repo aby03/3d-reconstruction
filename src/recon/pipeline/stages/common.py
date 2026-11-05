@@ -1,6 +1,6 @@
 """Helpers shared by stage adapters for reading upstream artifacts."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -51,6 +51,7 @@ class KeyframeInputs:
     image_dirs: dict[str, Path]  # sequence_id -> keyframe image dir
     gravity: pd.DataFrame  # gravity_cam.csv rows of every sequence
     gyro: dict[str, GyroRotations]  # sequences that have gyro rotations
+    sensor_dirs: dict[str, Path] = field(default_factory=dict)  # sequence_id -> ingested sensor tables (accel.csv, ...)
 
     @property
     def names(self) -> list[str]:
@@ -59,7 +60,7 @@ class KeyframeInputs:
 
 def read_keyframe_inputs(sequence_dirs: dict[str, Path]) -> KeyframeInputs:
     """Keyframes, gravity priors and gyro rotations of every sequence (sequence_id -> sequence dir)."""
-    images, gravity, image_dirs, gyro = [], [], {}, {}
+    images, gravity, image_dirs, gyro, sensor_dirs = [], [], {}, {}, {}
     for sequence_id, sequence_dir in sequence_dirs.items():
         keyframes = stage_dir(sequence_dir, s02_keyframes.DIR_NAME)
         table = read_csv(keyframes / s02_keyframes.ARTIFACTS["keyframes"], s02_keyframes.KEYFRAMES_COLUMNS)
@@ -72,8 +73,9 @@ def read_keyframe_inputs(sequence_dirs: dict[str, Path]) -> KeyframeInputs:
             info = read_json(ingest / s01_ingest.ARTIFACTS["sequence"])
             R_cam_imu = np.asarray(info["extrinsics"][s02_keyframes.CAMERA_ID]["R_cam_imu"])
             gyro[sequence_id] = GyroRotations(R_cum, R_cam_imu)
+        sensor_dirs[sequence_id] = ingest / "sensors"
     table = pd.concat(images, ignore_index=True).sort_values("image_name", ignore_index=True)
-    return KeyframeInputs(table, image_dirs, pd.concat(gravity, ignore_index=True), gyro)
+    return KeyframeInputs(table, image_dirs, pd.concat(gravity, ignore_index=True), gyro, sensor_dirs)
 
 
 def gravity_vectors(gravity: pd.DataFrame, min_conf: float) -> dict[str, np.ndarray]:

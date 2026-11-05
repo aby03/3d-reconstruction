@@ -2,10 +2,12 @@
 
 import logging
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 import pycolmap
 
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log, link_image_root, write_model
@@ -27,6 +29,7 @@ from recon.sfm.priors import (
     write_gravity_priors,
 )
 from recon.sfm.continuity import analyze as analyze_continuity, summary as continuity_summary
+from recon.sfm.imu_checks import analyze_heading, analyze_motion, down_in_model
 from recon.sfm.refine import polish, refine, sanity_checks
 from recon.sfm.repair import repair
 from recon.sfm.quality import (
@@ -57,6 +60,11 @@ ARTIFACTS = {
     "plot_reproj": "reports/plots/reproj_hist.png",
     "plot_trajectory": "reports/plots/trajectory_topdown.png",
 }
+
+
+def _read_sensors(inputs, kind: str) -> dict[str, pd.DataFrame]:
+    """The ingested `kind` table (`t_ns, x, y, z`) of every sequence that has one."""
+    return {k: pd.read_csv(d / f"{kind}.csv") for k, d in inputs.sensor_dirs.items() if (d / f"{kind}.csv").exists()}
 
 
 def _write_plots(out: Path, rec: pycolmap.Reconstruction) -> None:
@@ -186,6 +194,57 @@ def run_sfm(
                 f" ({continuity['num_flagged_strong']} by two or more checks)"
             )
             log.warning(warnings[-1])
+    remap_report: dict[str, Any] = {"attempted": False, "kept": False}
+    num_jumps = sum(len(v.get("jumps", [])) for v in continuity.get("sequences", {}).values())
+    if options.mapper.retry_on_jumps and num_jumps and mapper_used == "global":
+        # a path in pieces is typical of the global mapper on stretches with little translation: map incrementally
+        remap_report.update(attempted=True, jumps_before=num_jumps)
+        with colmap_log(log_file):
+            raw2, used2, attempts2 = map_with_fallback(
+                database, image_root, out / "sparse" / "_mapping_incremental", len(names),
+                replace(options.mapper, backend="incremental", fallback=False), seed, use_gpu, gpu_index, use_gravity,
+            )
+            candidate = refine(raw2, database, image_root, options.refine, use_gpu, gpu_index) if raw2 else None
+        if candidate is not None:
+            rec2, steps2, dropped2 = candidate
+            after = analyze_continuity(rec2, inputs.images, inputs.gyro, options.continuity)
+            jumps_after = sum(len(v.get("jumps", [])) for v in after["sequences"].values())
+            keep = jumps_after < num_jumps and rec2.num_reg_images() >= 0.95 * rec.num_reg_images()
+            remap_report.update(
+                jumps_after=jumps_after, flagged_before=continuity["num_flagged"], flagged_after=after["num_flagged"],
+                registered_before=rec.num_reg_images(), registered_after=rec2.num_reg_images(), kept=keep,
+            )
+            log.info(
+                "path in pieces (%d jumps): incremental mapping gives %d jumps, %d -> %d flagged, registered %d -> %d, %s",
+                num_jumps, jumps_after, continuity["num_flagged"], after["num_flagged"], rec.num_reg_images(),
+                rec2.num_reg_images(), "kept" if keep else "discarded",
+            )
+            if keep:
+                rec, continuity, refine_steps, dropped = rec2, after, steps2, dropped2
+                raw, mapper_used, attempts = raw2, used2, attempts2
+                raw_stats = {"num_registered": raw.num_reg_images(), "mean_reproj_px": raw.compute_mean_reprojection_error()}
+                write_model(raw, out / ARTIFACTS["model_raw"])
+    motion: dict[str, Any] = {"enabled": False}
+    heading: dict[str, Any] = {"enabled": False}
+    if options.motion.enabled or options.heading.enabled:
+        accel, mag = _read_sensors(inputs, "accel"), _read_sensors(inputs, "magnetic")
+        R_cam_imu = {k: v.R_cam_imu for k, v in inputs.gyro.items()}
+        if options.motion.enabled:
+            motion = analyze_motion(rec, inputs.images, accel, R_cam_imu, down_in_model(rec, gravity), options.motion)
+            for name, signals in motion["flagged"].items():  # a second opinion on the path, the same as a continuity signal
+                continuity["flagged"].setdefault(name, [])
+                continuity["flagged"][name] += [x for x in signals if x not in continuity["flagged"][name]]
+            continuity["num_flagged"] = len(continuity["flagged"])
+            continuity["num_flagged_strong"] = sum(len(v) >= 2 for v in continuity["flagged"].values())
+            if motion.get("scale"):
+                log.info(
+                    "accelerometer windows: %d, scale spread %.2f (log), %d image(s) flagged",
+                    motion["windows"], motion["scale"]["log_spread"], len(motion["flagged"]),
+                )
+        if options.heading.enabled:
+            heading = analyze_heading(rec, inputs.images, mag, R_cam_imu, options.heading)
+            if heading.get("checked"):
+                log.info("magnetometer: %d keyframes, %d outlier(s)", heading["checked"], len(heading["outliers"]))
     repair_report: dict[str, Any] = {"enabled": options.repair.enabled, "kept": False, "records": []}
     if options.repair.enabled and continuity.get("num_flagged_strong"):
         candidate = pycolmap.Reconstruction(rec)
@@ -253,6 +312,9 @@ def run_sfm(
             "sanity_warnings": sanity_warnings,
         },
         "continuity": continuity,
+        "remap": remap_report,
+        "motion": motion,
+        "heading": heading,
         "repair": repair_report,
         "unregistered_images": stats["unregistered_images"],
         "per_image": per_image_stats(rec),

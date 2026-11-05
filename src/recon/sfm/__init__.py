@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 
 from recon.sfm.continuity import ContinuityOptions
 from recon.sfm.features import FeatureOptions
+from recon.sfm.imu_checks import HeadingOptions, MotionOptions
 from recon.sfm.mapper import MapperOptions
 from recon.sfm.matching import MatchingOptions
 from recon.sfm.priors import PriorOptions
@@ -19,3 +20,5 @@ class SfmOptions:
     refine: RefineOptions = field(default_factory=RefineOptions)
     continuity: ContinuityOptions = field(default_factory=ContinuityOptions)
     repair: RepairOptions = field(default_factory=RepairOptions)
+    motion: MotionOptions = field(default_factory=MotionOptions)
+    heading: HeadingOptions = field(default_factory=HeadingOptions)

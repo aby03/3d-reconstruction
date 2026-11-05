@@ -17,6 +17,9 @@ from recon.sfm.priors import PAIR_FILTER_COLUMNS
 REPORT_KEYS = {
     "continuity",
     "repair",
+    "remap",
+    "motion",
+    "heading",
     "num_images_input",
     "num_registered",
     "registered_ratio",
@@ -174,7 +177,7 @@ def test_pair_filter(sfm_run, report):
     assert not report["pair_filter_disabled"]
     assert report["pair_filter_removed"] == errors["removed"].sum() <= 0.3 * len(errors)
     removed = errors["removed"]
-    assert (errors.loc[removed, "err_deg"] > 10).all() and (errors.loc[~removed, "err_deg"] <= 10).all()
+    assert (errors.loc[removed, "err_deg"] > 10).all()  # kept pairs above 10 deg are allowed where the gyro drifted
     # image and gyro rotations agree: also checks cam2_from_cam1 against our cam_j_from_cam_i
     assert errors["err_deg"].median() < 3
     db = pycolmap.Database.open(sfm_run / ARTIFACTS["database"])
@@ -332,3 +335,57 @@ def test_time_pairs_follow_capture_time_across_cameras():
     queries = _query_images(images, period=10)
     assert queries[:3] == ["s/cam0/000000.jpg", "s/cam0/000060.jpg", "s/cam0/000120.jpg"]
     assert sum("cam1" in q for q in queries) == 6  # every still is a query
+
+
+def _walk(n: int = 40, dt: float = 0.4):
+    """A smooth 2D walk in metres sampled at keyframe times, with its acceleration."""
+    t = np.arange(n) * dt
+    path = lambda q: np.stack([2 * np.sin(q / 2.5), 1.5 * np.cos(q / 3.5), 0.05 * q], axis=1)  # noqa: E731
+    return t, path
+
+
+def test_motion_windows_recover_scale_and_flag_a_displaced_keyframe():
+    import pandas as pd
+
+    from recon.sfm.imu_checks import GRAVITY, analyze_motion
+
+    t, path = _walk()
+    h = 1e-3
+    scale = 2.5
+    centres = {f"s/cam0/{i:06d}.jpg": scale * path(t)[i : i + 1][0] for i in range(len(t))}
+    bad = "s/cam0/000020.jpg"
+    centres[bad] = centres[bad] + np.array([4.0, 3.0, 2.0])
+    samples = np.arange(t[0], t[-1], 0.005)
+    acc = (path(samples + h) - 2 * path(samples) + path(samples - h)) / h**2
+    down = np.array([0.0, 0.0, -1.0])
+    f_dev = acc - GRAVITY * down  # the accelerometer reads acceleration minus gravity
+    accel = {"s": pd.DataFrame({"t_ns": (samples * 1e9).astype(np.int64), "x": f_dev[:, 0], "y": f_dev[:, 1], "z": f_dev[:, 2]})}
+    images = pd.DataFrame({"image_name": list(centres), "sequence_id": "s", "idx": range(len(t)), "t_ns": (t * 1e9).astype(np.int64)})
+    report = analyze_motion(_fake_model(centres), images, accel, {"s": np.eye(3)}, down)
+    assert report["windows"] > 5
+    assert abs(report["scale"]["median"] - scale) / scale < 0.1
+    assert bad in report["flagged"]
+    assert set(report["flagged"]) <= {bad}
+
+
+def test_heading_flags_a_keyframe_whose_rotation_the_magnetometer_contradicts():
+    import pandas as pd
+    from scipy.spatial.transform import Rotation
+
+    from recon.sfm.imu_checks import analyze_heading
+
+    n = 60
+    t = np.arange(n) * 0.2
+    R = {f"s/cam0/{i:06d}.jpg": Rotation.from_euler("zyx", [0.3 * t[i], 0.2 * np.sin(t[i]), 0.1 * np.cos(t[i])]).as_matrix() for i in range(n)}
+    field, offset = np.array([20.0, -5.0, -40.0]), np.array([3.0, -2.0, 1.0])
+    readings = np.array([R[name] @ field + offset for name in R])  # the device reads R m + o
+    names = list(R)
+    wrong = names[30]
+    R_model = dict(R)
+    R_model[wrong] = Rotation.from_euler("z", 1.0).as_matrix() @ R[wrong]  # a camera rotated 57 degrees about up
+    magnetic = {"s": pd.DataFrame({"t_ns": (t * 1e9).astype(np.int64), "x": readings[:, 0], "y": readings[:, 1], "z": readings[:, 2]})}
+    images = pd.DataFrame({"image_name": names, "sequence_id": "s", "idx": range(n), "t_ns": (t * 1e9).astype(np.int64)})
+    centres = {name: np.zeros(3) for name in names}
+    report = analyze_heading(_fake_model(centres, R_model), images, magnetic, {"s": np.eye(3)})
+    assert report["checked"] == n
+    assert [o["image"] for o in report["outliers"]] == [wrong]

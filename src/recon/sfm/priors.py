@@ -20,7 +20,10 @@ class PairFilterOptions:
     max_rot_err_deg: float = 10.0  # gyro check: image vs gyro relative rotation
     max_dt_s: float = 5.0  # pairs further apart in time (or across sequences) get the tilt check
     tilt_err_deg: float = 5.0  # tilt check: the image rotation must carry one gravity prior onto the other
-    max_removed_frac: float = 0.3  # removing more than this means the IMU is suspect: remove nothing
+    max_removed_frac: float = 0.3  # more than this of the reliable (short time gap) gyro pairs disagreeing: the IMU is suspect, remove nothing
+    reliable_dt_s: float = 0.5  # gyro pairs up to this far apart judge the IMU (drift is small there)
+    drift_k: float = 6.0  # a gyro pair is wrong above the median error of its time-gap bin by this many scaled MADs ...
+    #                       ... and above max_rot_err_deg: the tolerance grows with the gap as the gyro drifts
 
 
 @dataclass(slots=True)
@@ -123,15 +126,39 @@ def pair_rotation_errors(
     return pd.DataFrame(rows, columns=PAIR_FILTER_COLUMNS[:-1])
 
 
+def _gyro_limits(errors: pd.DataFrame, options: PairFilterOptions) -> pd.Series:
+    """Per gyro pair the largest rotation disagreement still accepted: `max_rot_err_deg`, or more where the pairs of
+    similar time gap show the gyro itself has drifted (bin median + `drift_k` scaled MADs)."""
+    limit = pd.Series(options.max_rot_err_deg, index=errors.index, dtype=float)
+    gyro = errors[(errors["check"] == "gyro") & errors["err_deg"].notna() & errors["dt_s"].notna()]
+    if len(gyro) < 40:
+        return limit
+    bins = pd.qcut(gyro["dt_s"], q=min(8, len(gyro) // 20), duplicates="drop")
+    for _, group in gyro.groupby(bins, observed=True):
+        med = float(group["err_deg"].median())
+        mad = 1.4826 * float((group["err_deg"] - med).abs().median())
+        limit[group.index] = max(options.max_rot_err_deg, med + options.drift_k * mad)
+    return limit
+
+
 def filter_pairs(
     database: Path, errors: pd.DataFrame, options: PairFilterOptions
 ) -> tuple[pd.DataFrame, float | None]:
-    """Delete the pairs whose rotation disagrees with the IMU from `database`; returns `errors` with `removed`, and
-    the fraction of disagreeing pairs when that is above `max_removed_frac` (the filter then removes nothing)."""
+    """Delete the pairs whose rotation disagrees with the IMU from `database`. The IMU is judged by the gyro pairs
+    with a short time gap (little drift): when more than `max_removed_frac` of those disagree (or, with fewer than
+    20 such pairs, of all checked pairs) nothing is removed and that fraction is returned. Gyro pairs further apart
+    are held to a tolerance that grows with the gap (`_gyro_limits`)."""
     errors = errors.copy()
-    limit = errors["check"].map({"gyro": options.max_rot_err_deg, "tilt": options.tilt_err_deg})
+    limit = errors["check"].map({"gyro": options.max_rot_err_deg, "tilt": options.tilt_err_deg}).astype(float)
+    gyro_limit = _gyro_limits(errors, options)
+    is_gyro = errors["check"] == "gyro"
+    limit[is_gyro] = gyro_limit[is_gyro]
     disagree = (errors["err_deg"] > limit).fillna(False).astype(bool)
-    disabled = options.enabled and len(errors) > 0 and disagree.mean() > options.max_removed_frac
+    strict = (errors["err_deg"] > options.max_rot_err_deg).fillna(False).astype(bool)
+    reliable = is_gyro & (errors["dt_s"] <= options.reliable_dt_s)
+    judged = strict[reliable] if reliable.sum() >= 20 else strict[errors["check"] != "none"]
+    suspect_frac = float(judged.mean()) if len(judged) else 0.0
+    disabled = options.enabled and len(errors) > 0 and suspect_frac > options.max_removed_frac
     errors["removed"] = disagree & options.enabled & (not disabled)
     if errors["removed"].any():
         db = pycolmap.Database.open(database)
@@ -142,4 +169,4 @@ def filter_pairs(
                 db.delete_inlier_matches(ids[name1], ids[name2])
         finally:
             db.close()
-    return errors, float(disagree.mean()) if disabled else None
+    return errors, suspect_frac if disabled else None

@@ -77,10 +77,13 @@ sfm:
       max_rot_err_deg: 10.0      # pairs up to max_dt_s apart: angle between image and gyro rotation
       max_dt_s: 5.0
       tilt_err_deg: 5.0          # other pairs: angle between the rotated gravity of one image and the other's
-      max_removed_frac: 0.3      # more disagreeing pairs than this: the IMU is suspect, remove nothing (warning)
+      max_removed_frac: 0.3      # more of the reliable (short time gap) gyro pairs disagreeing than this: the IMU is suspect, remove nothing (warning)
+      reliable_dt_s: 0.5         # gyro pairs up to this far apart judge the IMU
+      drift_k: 6.0               # farther pairs: wrong above the median error of their time-gap bin by this many scaled MADs (and above max_rot_err_deg)
   mapper:
     backend: global              # global (COLMAP's GLOMAP) | incremental
     fallback: true               # when fewer than min_registered_ratio of the keyframes register or the mapper
+    retry_on_jumps: true         # global mapping that leaves jumps in the camera path (see sfm.continuity): map incrementally too, keep it when it has fewer jumps
     min_registered_ratio: 0.8    #   fails: retry global without gravity, then incremental; the best result is kept
   refine:                        # sparse/refined: retriangulate, upgrade the camera, BA, filter, BA
     enabled: true                # false: sparse/refined is a copy of sparse/raw
@@ -97,6 +100,20 @@ sfm:
     max_still_dt_s: 1.0          # a still is compared with the path camera nearest in time when within this
     rotation_floor_deg: 3.0      # gyro-vs-SfM rotation step must also exceed this
     gyro_max_dt_s: 1.0           # rotation steps are checked against the gyro up to this time gap
+    gap_factor: 5.0              # a step longer than this many times the 95th-percentile step is a jump on its own
+  motion:                        # accelerometer integrated inside short windows of keyframes (start velocity, bias and scale fitted per window)
+    enabled: true
+    window: 8
+    stride: 4
+    max_step_s: 1.5              # a window never spans a longer gap between keyframes
+    min_motion: 3.0              # skipped when the window path is shorter than this many median steps
+    max_condition: 100000.0
+    k: 4.0
+    min_step_factor: 1.0
+  heading:                       # magnetometer against the camera orientations (report only)
+    enabled: true
+    k: 4.0
+    floor_frac: 0.15
   repair:                        # re-register cameras that several continuity checks flag; kept only when the model gets better
     enabled: true
     min_signals: 2               # independent checks that flag a camera
