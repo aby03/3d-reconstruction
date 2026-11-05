@@ -153,7 +153,7 @@ def write_glb(obj: Path, out: Path, options: GlbOptions | None = None) -> dict[s
     return {"faces": sum(len(g.faces) for g in scene.geometry.values()), "bounds_w": bounds_w}
 
 
-def validate_glb(path: Path, faces: int, bounds_w: np.ndarray, diag: float) -> dict[str, Any]:
+def validate_glb(path: Path, faces: int, bounds_w: np.ndarray, diag: float, tolerance: float = 0.0) -> dict[str, Any]:
     """Check the GLB `path` against its source (face count, W bounds; `diag` scales the bounds tolerance): valid
     header and chunks, every image and buffer embedded (no `uri`), normals on every primitive, materials textured,
     and the reloaded scene with `faces` faces and the bounds R_GW · `bounds_w`. Raises ValueError on the first
@@ -178,7 +178,8 @@ def validate_glb(path: Path, faces: int, bounds_w: np.ndarray, diag: float) -> d
     if num_faces != faces:
         raise ValueError(f"{path.name}: {num_faces} faces, the source has {faces}")
     expected, bounds = rotate_bounds(np.asarray(bounds_w), R_GW), scene_bounds(scene)
-    if np.abs(bounds - expected).max() > 1e-4 * diag:
+    # a decimated model may lose an extreme vertex or place a merged one slightly outside: `tolerance` allows for it
+    if np.abs(bounds - expected).max() > max(1e-4, tolerance) * diag:
         raise ValueError(f"{path.name}: bounds {bounds.tolist()} != R_GW of the source bounds {expected.tolist()}")
     textures = []
     for image in images:

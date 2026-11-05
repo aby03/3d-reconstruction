@@ -39,13 +39,21 @@ def vertex_colors(textured_obj: Path, num_vertices: int) -> np.ndarray:
     return np.round(total / np.maximum(count, 1)[:, None]).astype(np.uint8)
 
 
+def _face_set(faces: np.ndarray) -> np.ndarray:
+    """The faces in a canonical order: each rotated to start at its smallest index (the winding is kept), rows sorted.
+    OpenMVS writes the faces grouped by texture, so their order differs from the geometry file."""
+    start = faces.argmin(axis=1)
+    rotated = faces[np.arange(len(faces))[:, None], (start[:, None] + np.arange(3)) % 3]
+    return rotated[np.lexsort(rotated.T[::-1])]
+
+
 def write_vertex_color_ply(textured_obj: Path, geometry_ply: Path, out: Path) -> dict[str, Any]:
     """`out`: the geometry of `geometry_ply` (the textured mesh's vertices and faces, welded) as a binary PLY with
     per-vertex colours from the atlases of `textured_obj`. Raises ValueError when the two meshes differ."""
     geometry = read_mesh(geometry_ply)
     vertices, faces = read_obj_faces(textured_obj)
     if len(vertices) != len(geometry.vertices) or not np.array_equal(
-        np.concatenate(list(faces.values())), np.asarray(geometry.faces)
+        _face_set(np.concatenate(list(faces.values()))), _face_set(np.asarray(geometry.faces))
     ):
         raise ValueError(f"{textured_obj.name} and {geometry_ply.name} have different vertices or faces")
     colors = np.c_[vertex_colors(textured_obj, len(vertices)), np.full(len(vertices), 255, np.uint8)]

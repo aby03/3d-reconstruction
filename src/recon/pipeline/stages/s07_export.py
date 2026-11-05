@@ -119,7 +119,7 @@ def run_export(
     if options.preview_faces:
         preview = out / ARTIFACTS["glb_preview"]
         preview_faces = write_preview_glb(textured_obj, preview, options.preview_faces, options.glb)
-        preview_info = validate_glb(preview, preview_faces, bounds_w, diag)
+        preview_info = validate_glb(preview, preview_faces, bounds_w, diag, tolerance=0.01)
     timings["glb"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
