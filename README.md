@@ -44,6 +44,32 @@ Per-sequence stages write to `outputs/<scene>/sequences/<id>/<NN_stage>/`, scene
 
 `configs/default.yaml` lists every key with its default; unknown keys are errors.
 
+## Collect your own data
+
+The pipeline reads captures made with the Android app [Open Camera Sensors](https://f-droid.org/en/packages/com.opencamera_sensors.app/) (F-Droid). It is the only capture source supported at the moment. The app records a video together with the raw accelerometer, gyroscope and magnetometer streams and a timestamp per video frame, and can save sharper reference JPEGs while recording.
+
+1. Install the app from F-Droid, and in its settings turn on recording of all three sensors: the gyroscope (pair filter, rotation priors, camera-IMU check), the accelerometer (gravity direction that levels the model, motion check of the path) and the magnetometer (heading check of the path). A missing stream is a warning and the checks that need it are skipped.
+2. Record one continuous video while walking through the room. Reference JPEGs saved during the recording are used as a second, sharper camera (`keyframes.stills`; turn off with `--set keyframes.stills=false`).
+3. Copy the files from the phone into one folder, keeping the layout the app writes (`<stamp>` is `YYYYMMDD_HHMMSS`):
+
+```
+my_room/
+  VID_<stamp>.mp4
+  <stamp>/
+    VID_<stamp>_imu_timestamps.csv      one timestamp (ns) per video frame
+    VID_<stamp>accel.csv  VID_<stamp>gyro.csv  VID_<stamp>magnetic.csv      x,y,z,t_ns without header
+    <t_ns>.jpg                          reference stills (optional)
+```
+
+4. Run it: `pixi run recon run --input my_room --scene my_room` (`data/hotel1` is a complete example).
+
+Notes from the two captures used so far (`hotel1`, `room2`: about one minute each, about 370 images):
+
+- Only captures of about a minute have been tested; longer ones have not been run.
+- Walk slowly and keep the room in view. Textureless walls, windows and mirrors reconstruct poorly (gap filling patches the missing wall surface from monocular depth).
+- Turning on the spot for a long time at the start of `hotel1` coincided with the global mapper cutting the camera path into pieces; the `sfm` stage detects this and re-maps with the incremental mapper, but a path that keeps moving is the safer capture.
+- The loader checks that the frame timestamps match the video and that the reference JPEGs match the decoded frames (`--no-verify-refs` skips the second check). If the camera and IMU clocks are offset, `--time-offset-ns` shifts the frame times.
+
 ## Pipeline
 
 | # | Stage | What it does | Main outputs |
