@@ -317,7 +317,18 @@ export:                          # step 7: model.glb (Y up, textures embedded) +
   glb:
     double_sided: true           # room interiors are seen from inside
 
-report:                          # step 8: 08_report/summary.json + index.html; a failed threshold is a warning
+report:                          # step 8: 08_report/summary.json + index.html + figures/; a failed threshold is a warning
+  figures:                       # figures/{overview,stages,path,details}.png (and panels/): renders of the outputs, the camera path with numbered waypoints
+    enabled: true
+    width: 1400                  # size of a rendered view in pixels
+    height: 800
+    azimuth: 35.0                # camera direction around the vertical axis and above the horizon, degrees
+    elevation: 50.0
+    zoom: 1.25
+    clip_frac: 0.04              # views from above cut the model this fraction of the room height below the ceiling plane
+    max_points: 1500000          # dense points drawn
+    waypoints: 12                # numbered time steps on the camera path figure
+    timeout_s: 1200.0            # the rendering process is stopped after this long
   thresholds:                    # stage -> metric -> bound (minimum for frames_valid_ratio, ref_jpeg_min_psnr_db,
     ingest:                      # registered_ratio; maximum for the other numbers; equal for true/false)
       frames_valid_ratio: 0.99

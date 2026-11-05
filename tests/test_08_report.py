@@ -29,6 +29,16 @@ def test_manifest(report_run):
     assert manifest.metrics["stages"] == len(STAGES) and manifest.metrics["checks"] == 10
 
 
+def test_figures(report_run):
+    """The figures of the run; the 3D renders need an OpenGL window, so without one they are warnings, but the camera
+    path (matplotlib) is always there."""
+    figures = report_run / ARTIFACTS["figures"]
+    assert (figures / "path.png").is_file() and (figures / "panels/sfm_path.png").is_file()
+    skipped = [w for w in read_manifest(report_run).warnings if w.startswith("figure")]
+    if not skipped:
+        assert all((figures / f"{name}.png").is_file() for name in ("overview", "stages", "path", "details"))
+
+
 def test_summary(report_run, mesh_post_run):
     summary = read_json(report_run / ARTIFACTS["summary"])
     assert summary["scene"] == "room2_tiny" and summary["run_id"] == report_run.parent.name

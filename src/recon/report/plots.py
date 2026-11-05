@@ -187,6 +187,36 @@ def plot_trajectory_topdown(
     return _save(fig, path)
 
 
+def _waypoint_labels(path_xy: np.ndarray, picks: np.ndarray, extent: float) -> np.ndarray:
+    """Label positions for the path points `picks` (indices into `path_xy`): each label sits beside the path on the
+    side with more free room, then labels that are too close to each other are pushed apart."""
+    gap = 0.035 * extent
+    positions = []
+    for i in picks:
+        lo, hi = max(i - 3, 0), min(i + 3, len(path_xy) - 1)
+        tangent = path_xy[hi] - path_xy[lo]
+        norm = np.linalg.norm(tangent)
+        normal = np.array([-tangent[1], tangent[0]]) / norm if norm > 0 else np.array([0.0, 1.0])
+        others = np.delete(path_xy, np.arange(max(i - 15, 0), min(i + 16, len(path_xy))), axis=0)
+        room = [np.min(np.linalg.norm(others - (path_xy[i] + side * normal * gap), axis=1)) if len(others) else 1.0 for side in (1, -1)]
+        positions.append(path_xy[i] + (1 if room[0] >= room[1] else -1) * normal * gap)
+    positions = np.array(positions)
+    for _ in range(200):  # push labels apart until none is closer than 1.6 gaps
+        moved = False
+        for a in range(len(positions)):
+            for b in range(a + 1, len(positions)):
+                d = positions[b] - positions[a]
+                dist = np.linalg.norm(d)
+                if dist < 1.6 * gap:
+                    push = (d / dist if dist > 1e-9 else np.array([1.0, 0.0])) * (1.6 * gap - dist) / 2
+                    positions[a] -= push
+                    positions[b] += push
+                    moved = True
+        if not moved:
+            break
+    return positions
+
+
 def plot_path_topdown(
     centres: np.ndarray,
     forward: np.ndarray,
@@ -194,12 +224,16 @@ def plot_path_topdown(
     points: np.ndarray,
     path: Path,
     max_points: int = 40_000,
-    max_arrows: int = 120,
+    max_arrows: int = 60,
     seed: int = 0,
+    times: Sequence[float] | None = None,
+    waypoints: int = 12,
 ) -> Path:
     """The walk seen from above: sparse points in grey, the camera path of the largest group (given in time order)
-    coloured from first to last, an arrow per camera along its viewing direction (every n-th camera, at most
-    `max_arrows`) and the other groups (e.g. stills) as small markers."""
+    coloured from first to last with arrowheads along the walking direction, numbered waypoints at equal time steps
+    (the table on the right gives the elapsed seconds of each number; `times` are the camera times in seconds, the
+    camera order when None), thin red arrows for the viewing direction (every n-th camera, at most `max_arrows`) and the
+    other groups (e.g. stills) as small markers. Labels are kept apart from each other."""
     centres, forward = np.asarray(centres, dtype=float), np.asarray(forward, dtype=float)
     points = np.asarray(points, dtype=float).reshape(-1, 3)
     if len(points) > max_points:
@@ -211,34 +245,59 @@ def plot_path_topdown(
     labels = sorted(set(groups.tolist()))
     main = max(labels, key=groups.tolist().count)
     idx = np.flatnonzero(groups == main)
+    seconds = np.asarray(times, dtype=float)[idx] if times is not None else np.arange(len(idx), dtype=float)
+    seconds = seconds - seconds[0]
+    path_xy = centres[idx, :2]
     everything = np.concatenate([centres[:, :2], points[:, :2]]) if len(points) else centres[:, :2]
     extent = float(np.max(everything.max(axis=0) - everything.min(axis=0))) or 1.0
-    arrow = 0.04 * extent
-    fig = Figure(figsize=(10, 9))
-    ax = fig.add_subplot(1, 1, 1)
+    fig = Figure(figsize=(13, 7.5))
+    grid = fig.add_gridspec(1, 2, width_ratios=[4, 1], wspace=0.03)
+    ax, table = fig.add_subplot(grid[0]), fig.add_subplot(grid[1])
     if len(points):
-        ax.scatter(points[:, 0], points[:, 1], s=0.3, color="0.75", alpha=0.5)
-    ax.plot(centres[idx, 0], centres[idx, 1], lw=0.5, color="0.3", zorder=2)
-    order = np.linspace(0, 1, len(idx))
-    sc = ax.scatter(centres[idx, 0], centres[idx, 1], c=order, cmap="viridis", s=9, zorder=3)
+        ax.scatter(points[:, 0], points[:, 1], s=0.3, color="0.8", alpha=0.5, rasterized=True)
     pick = idx[:: max(1, len(idx) // max_arrows)]
     ax.quiver(
-        centres[pick, 0], centres[pick, 1], forward[pick, 0], forward[pick, 1], color="tab:red", angles="xy",
-        scale_units="xy", scale=1 / arrow, width=0.002, zorder=4,
+        centres[pick, 0], centres[pick, 1], forward[pick, 0], forward[pick, 1], color="tab:red", alpha=0.45,
+        angles="xy", scale_units="xy", scale=1 / (0.035 * extent), width=0.0015, zorder=2,
     )
+    ax.plot(path_xy[:, 0], path_xy[:, 1], lw=0.6, color="0.35", zorder=3)
+    sc = ax.scatter(path_xy[:, 0], path_xy[:, 1], c=seconds, cmap="viridis", s=8, zorder=4)
     for group in labels:
         if group != main:
             other = np.flatnonzero(groups == group)
-            ax.scatter(centres[other, 0], centres[other, 1], s=10, marker="s", facecolors="none", edgecolors="tab:orange", label=f"{group} ({len(other)})", zorder=3)
-    ax.scatter(*centres[idx[0], :2], s=120, marker="o", facecolors="none", edgecolors="tab:green", linewidths=2, label="start", zorder=5)
-    ax.scatter(*centres[idx[-1], :2], s=120, marker="X", color="tab:red", label="end", zorder=5)
+            ax.scatter(centres[other, 0], centres[other, 1], s=9, marker="s", facecolors="none", edgecolors="tab:orange", linewidths=0.6, alpha=0.8, label=f"{group} (stills, {len(other)})", zorder=3)
+    count = min(waypoints, len(idx))
+    targets = np.linspace(0, seconds[-1], count)
+    picks = np.unique([int(np.abs(seconds - t).argmin()) for t in targets])
+    for k in range(len(picks) - 1):  # an arrowhead between consecutive waypoints, on the path
+        mid = (picks[k] + picks[k + 1]) // 2
+        a, b = path_xy[max(mid - 1, 0)], path_xy[min(mid + 1, len(path_xy) - 1)]
+        if np.linalg.norm(b - a) > 0:
+            ax.annotate("", xy=b, xytext=a, arrowprops=dict(arrowstyle="-|>", color="black", lw=0, mutation_scale=14), zorder=5)
+    spots = _waypoint_labels(path_xy, picks, extent)
+    rows = []
+    for number, (i, spot) in enumerate(zip(picks, spots), start=1):
+        ax.plot([path_xy[i, 0], spot[0]], [path_xy[i, 1], spot[1]], lw=0.7, color="black", zorder=5)
+        ax.scatter(*path_xy[i], s=14, color="black", zorder=6)
+        ax.text(spot[0], spot[1], str(number), ha="center", va="center", fontsize=9, fontweight="bold", zorder=7,
+                bbox=dict(boxstyle="circle,pad=0.25", facecolor="white", edgecolor="black", linewidth=0.9))
+        rows.append((number, seconds[i], "start" if number == 1 else "end" if number == len(picks) else ""))
     ax.set_aspect("equal")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_title(f"camera path from above ({main}, {len(idx)} cameras; red arrows: viewing direction)")
-    ax.legend(loc="best", fontsize=8)
-    fig.colorbar(sc, ax=ax, shrink=0.6, label="time (first to last)")
-    fig.tight_layout()
+    ax.set_title(f"camera path from above ({main}, {len(idx)} cameras)")
+    handles, names = ax.get_legend_handles_labels()
+    table.axis("off")
+    table.text(0, 1.0, "waypoint   time", fontsize=10, fontweight="bold", va="top", transform=table.transAxes)
+    for r, (number, sec, note) in enumerate(rows):
+        table.text(0, 0.96 - r * 0.045, f"{number:>2}", fontsize=10, va="top", transform=table.transAxes,
+                   bbox=dict(boxstyle="circle,pad=0.2", facecolor="white", edgecolor="black", linewidth=0.8))
+        table.text(0.2, 0.96 - r * 0.045, f"{sec:5.1f} s  {note}", fontsize=10, va="top", transform=table.transAxes)
+    table.text(0, 0.96 - len(rows) * 0.045 - 0.04, "colour: time, first to last\nblack arrows: walking direction\nred arrows: viewing direction", fontsize=8.5, va="top", color="0.25", transform=table.transAxes)
+    if handles:
+        table.legend(handles, names, loc="upper left", bbox_to_anchor=(0, 0.96 - len(rows) * 0.045 - 0.13), fontsize=8.5, frameon=False)
+    fig.colorbar(sc, ax=ax, shrink=0.5, pad=0.01, label="elapsed time (s)")
+    fig.subplots_adjust(left=0.05, right=0.97, top=0.94, bottom=0.07)
     fig.savefig(path, dpi=130)
     return path
 

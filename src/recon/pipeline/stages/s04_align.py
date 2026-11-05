@@ -76,7 +76,12 @@ def _imu_inputs(sequence_dirs: dict[str, Path], inputs: KeyframeInputs) -> tuple
 
 
 def _write_plots(
-    out: Path, rec: pycolmap.Reconstruction, residuals: np.ndarray, floor_detected: bool, manhattan: dict[str, Any]
+    out: Path,
+    rec: pycolmap.Reconstruction,
+    residuals: np.ndarray,
+    floor_detected: bool,
+    manhattan: dict[str, Any],
+    t_ns: dict[str, int] | None = None,
 ) -> None:
     plots.plot_histogram(
         residuals, out / ARTIFACTS["plot_gravity"], "gravity residual (prior vs world down)", "degrees", bins=50
@@ -95,7 +100,7 @@ def _write_plots(
     )
     plots.plot_path_topdown(
         np.array([im.projection_center() for im in images]), forward, [f"camera {im.camera_id}" for im in images], points,
-        out / ARTIFACTS["plot_path_topdown"],
+        out / ARTIFACTS["plot_path_topdown"], times=[t_ns[im.name] * 1e-9 for im in images] if t_ns else None,
     )
     histogram = np.asarray(manhattan["histogram"] or np.zeros(90))
     plots.plot_yaw_histogram(histogram, manhattan["yaw_deg"], manhattan["applied"], out / ARTIFACTS["plot_yaw"])
@@ -150,7 +155,7 @@ def run_align(
     for sequence_id, lines in tum_lines(aligned, t_ns).items():
         (trajectory / f"{sequence_id}.txt").write_text("".join(f"{line}\n" for line in lines))
     _write_plots(
-        out, aligned, diagnostics["residuals_deg"], diagnostics["floor"]["detected"], diagnostics["manhattan"]
+        out, aligned, diagnostics["residuals_deg"], diagnostics["floor"]["detected"], diagnostics["manhattan"], t_ns
     )
     timings["write"] = time.perf_counter() - t0
 

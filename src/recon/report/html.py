@@ -82,7 +82,7 @@ def _stage_section(entry: Mapping[str, Any], checks: Sequence[Mapping[str, Any]]
     return "\n".join(parts)
 
 
-def render(summary: Mapping[str, Any], out: Path, timings_plot: str | None = None) -> Path:
+def render(summary: Mapping[str, Any], out: Path, timings_plot: str | None = None, figures: list[str] | None = None) -> Path:
     """Write `out` (index.html) for `summary`; image paths in the summary are relative to `out`'s folder."""
     checks = summary.get("checks", [])
     failed = [c for c in checks if c["pass"] is False]
@@ -113,6 +113,9 @@ def render(summary: Mapping[str, Any], out: Path, timings_plot: str | None = Non
     ]
     if timings_plot:
         sections.append(f'<img src="{escape(timings_plot)}" alt="stage durations">')
+    if figures:
+        sections.append("<h2>figures</h2>")
+        sections += [f'<a href="{escape(f)}"><img src="{escape(f)}" alt="{escape(f)}"></a>' for f in figures]
     for entry in summary["stages"]:
         sections.append(_stage_section(entry, [c for c in checks if c["stage"] == entry["stage"]]))
     page = (

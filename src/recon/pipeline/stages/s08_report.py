@@ -4,6 +4,7 @@
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from recon.pipeline.run_dir import RUN_MANIFEST_NAME, now_iso, read_manifest
 from recon.pipeline.stage import Stage, StageOutput, register_stage, registered_stages
 from recon.pipeline.stages import s06_mesh_post, s07_export
 from recon.report import ReportOptions
+from recon.report.figures import build_figures
 from recon.report.html import render
 from recon.report.plots import plot_timings
 from recon.report.summary import check, summarize
@@ -27,6 +29,7 @@ ARTIFACTS = {
     "html": "index.html",
     "plots": "plots",
     "plot_timings": "plots/timings.png",
+    "figures": "figures",
 }
 
 
@@ -86,10 +89,15 @@ def stage_entry(name: str, sequence_id: str | None, path: Path, out: Path) -> di
 
 
 def run_report(
-    entries: list[dict[str, Any]], run: dict[str, Any], out: Path, options: ReportOptions | None
+    entries: list[dict[str, Any]],
+    run: dict[str, Any],
+    out: Path,
+    options: ReportOptions | None,
+    make_figures: Callable[[], dict[str, Any]] | None = None,
 ) -> StageOutput:
     """Write `summary.json`, `plots/timings.png` and `index.html` into the stage dir `out` from the stage `entries`
-    (`stage_entry`) and the run info `run`. Threshold failures are warnings."""
+    (`stage_entry`) and the run info `run`; `make_figures` builds the figures once the timings plot exists (they are linked from the page).
+    Threshold failures are warnings."""
     options = options or ReportOptions()
     t0 = time.perf_counter()
     summary = summarize(run, entries)
@@ -102,10 +110,12 @@ def run_report(
         if e["duration_s"] is not None
     }
     plot_timings(durations, out / ARTIFACTS["plot_timings"])
+    figures = make_figures() if make_figures else None
     write_json(summary, out / ARTIFACTS["summary"])
-    render(summary, out / ARTIFACTS["html"], ARTIFACTS["plot_timings"])
+    figure_files = [f"{ARTIFACTS['figures']}/{name}" for name in (figures or {}).get("figures", [])]
+    render(summary, out / ARTIFACTS["html"], ARTIFACTS["plot_timings"], figure_files)
 
-    warnings = [
+    warnings = list((figures or {}).get("warnings", [])) + [
         f"threshold: {c['stage']}.{c['metric']} = {c['value']} (needs {c['op']} {c['threshold']})"
         for c in summary["checks"]
         if c["pass"] is not True
@@ -159,7 +169,14 @@ class ReportStage(Stage):
             "created": now_iso(),
             "config_diff": config_diff(ctx.config, load_config()),
         }
-        return run_report(entries, run, self.out, self.options)
+        (self.out / ARTIFACTS["figures"]).mkdir(parents=True, exist_ok=True)
+        sequence_dirs = {sequence_id: ctx.sequence_dir(sequence_id) for sequence_id in ctx.sequence_ids}
+        make_figures = (
+            (lambda: build_figures(ctx.run_dir, sequence_dirs, self.out / ARTIFACTS["figures"], self.options.figures))
+            if self.options.figures.enabled
+            else None
+        )
+        return run_report(entries, run, self.out, self.options, make_figures)
 
     def expected_artifacts(self) -> list[Path]:
         return [self.out / rel for rel in ARTIFACTS.values()]
