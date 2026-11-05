@@ -305,7 +305,6 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     cost_smoothness_ratio: 0.1
     virtual_face_images: 0
     sharpness_weight: 0.5
-    patch_packing_heuristic: 3
     seam_leveling: true
   texture_fix:                   # textured_fixed/: untextured faces coloured from the dense points, gutters, opaque MTL
     fill_untextured: true

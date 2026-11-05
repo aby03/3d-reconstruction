@@ -88,7 +88,7 @@ def _probe_pycolmap(info: DeviceInfo, gpu_index: int) -> None:
 
 
 def _probe_openmvs(info: DeviceInfo, gpu_index: int) -> None:
-    info.openmvs_cuda = bool(shutil.which(OPENMVS_DENSIFY)) and "--cuda-device" in _run(OPENMVS_DENSIFY, "--help")
+    info.openmvs_cuda = bool(shutil.which(OPENMVS_DENSIFY)) and "--gpu-device" in _run(OPENMVS_DENSIFY, "--help")
 
 
 def _probe_onnx(info: DeviceInfo, gpu_index: int) -> None:

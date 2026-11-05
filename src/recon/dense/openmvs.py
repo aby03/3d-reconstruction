@@ -26,7 +26,7 @@ DENSE_PLY = "scene_dense.ply"  # referenced by scene_dense.mvs
 MESH_PLY = "scene_dense_mesh.ply"
 REFINED_PLY = "scene_dense_mesh_refine.ply"
 PREVIEW_OBJ = "mesh.obj"
-CPU_DEVICE = -2  # --cuda-device: -2 CPU, -1 best GPU, >= 0 GPU index
+CPU_DEVICE = -2  # --gpu-device: -2 CPU, -1 best GPU, >= 0 GPU index
 DENSE_POINTS_PATTERN = r"Densifying point-cloud completed: (\d+) points"
 OOM_PATTERN = r"CUDA_ERROR_OUT_OF_MEMORY|out of memory|cudaErrorMemoryAllocation"
 
@@ -81,7 +81,7 @@ class OomRetry:
     tool: str
     from_level: int | None  # resolution level of the call that ran out of memory (None: the tool has none)
     to_level: int | None
-    cpu_fallback: bool  # the retry ran with --cuda-device -2
+    cpu_fallback: bool  # the retry ran with --gpu-device -2
 
 
 @dataclass(slots=True)
@@ -105,7 +105,7 @@ class MeshResult:
 
 
 def cuda_device(backend: str, gpu_index: int = 0) -> int:
-    """`--cuda-device` value: the GPU index on CUDA, -2 on the CPU (every tool needs it: most default to a GPU)."""
+    """`--gpu-device` value of DensifyPointCloud and RefineMesh: the GPU index on CUDA, -2 on the CPU."""
     return gpu_index if backend == "cuda" else CPU_DEVICE
 
 
@@ -138,7 +138,7 @@ def densify_args(options: OpenMvsOptions, device: int) -> list[str]:
         "--crop-to-roi", _flag(o.crop_to_roi),
         "--tower-mode", 0,  # no synthetic tower points
         "--remove-dmaps", _flag(not o.keep_dmaps),
-        "--cuda-device", device,
+        "--gpu-device", device,
     )
 
 
@@ -155,7 +155,6 @@ def reconstruct_mesh_args(
         "--smooth", o.smooth,
         "--decimate", o.decimate,
         "--crop-to-roi", _flag(crop_to_roi),
-        "--cuda-device", device,
     )
 
 
@@ -169,8 +168,7 @@ def refine_mesh_args(options: RefineOptions, device: int, mesh: str = MESH_PLY) 
         "--scales", o.scales,
         "--regularity-weight", o.regularity_weight,
         "--planar-vertex-ratio", 0,
-        "--reduce-memory", 1,
-        "--cuda-device", device,
+        "--gpu-device", device,
     )
 
 
@@ -183,7 +181,6 @@ def texture_mesh_args(options: PreviewOptions, device: int, mesh: str, out_rel: 
         "--min-resolution", o.min_resolution,
         "--global-seam-leveling", 0,  # seam leveling is slow and not needed for a quick look
         "--local-seam-leveling", 0,
-        "--cuda-device", device,
     )
 
 
@@ -307,7 +304,7 @@ def densify(
         attempts.append(_Attempt(densify_args(retry, device), device, OomRetry(DENSIFY, level, retry_level, False)))
         if cpu_fallback:
             attempts.append(_cpu_attempt(lambda d: densify_args(retry, d), DENSIFY, retry_level))
-    log.info("densifying at level %d (long side %d px), --cuda-device %d", level, side, device)
+    log.info("densifying at level %d (long side %d px), --gpu-device %d", level, side, device)
 
     def clear_dmaps() -> None:  # depth maps of the failed call are at another resolution
         for path in work_dir.glob("*.dmap"):

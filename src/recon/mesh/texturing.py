@@ -30,8 +30,7 @@ class TextureOptions:
     cost_smoothness_ratio: float = 0.1
     virtual_face_images: int = 0
     sharpness_weight: float = 0.5
-    patch_packing_heuristic: int = 3
-    seam_leveling: bool = True  # needs the patched OpenMVS build (patches/); an unpatched 2.4.0 turns textures black
+    seam_leveling: bool = True  # needs an OpenMVS build with the seam-leveling fix (develop has it; release 2.4.0 turns textures black)
 
 
 def texture_args(options: TextureOptions, device: int, mesh_rel: str, out_rel: str) -> list[str]:
@@ -48,13 +47,11 @@ def texture_args(options: TextureOptions, device: int, mesh_rel: str, out_rel: s
         "--cost-smoothness-ratio", o.cost_smoothness_ratio,
         "--virtual-face-images", o.virtual_face_images,
         "--sharpness-weight", o.sharpness_weight,
-        "--patch-packing-heuristic", o.patch_packing_heuristic,
         "--global-seam-leveling", int(o.seam_leveling),
         "--local-seam-leveling", int(o.seam_leveling),
         "--close-holes", 0,
         "--decimate", 1,
         "--empty-color", EMPTY_COLOR,
-        "--cuda-device", device,
     ]  # fmt: skip
     return [str(item) for item in items]
 

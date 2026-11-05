@@ -142,9 +142,10 @@ def test_report(report, aligned):
         "load", "undistort", "import", "densify", "filter", "mesh", "refine", "preview", "mono", "fusion", "outputs"
     }
     assert report["oom_retries"] == [] and all(t["calls"] == 1 for t in report["tools"].values())
-    # ~1857 px >> 1 = 928 (the undistorted size varies a little with the SfM intrinsics): level 2 is clamped to 1
+    # the hardware preset picked for this machine decides the level (the undistorted size varies a little with the SfM intrinsics)
     long_side = max(max(c["width"], c["height"]) for c in report["undistorted"].values())
-    assert report["densify"]["effective_long_side"] == long_side >> 1 and report["densify"]["effective_level"] == 1
+    level = report["densify"]["effective_level"]
+    assert report["densify"]["effective_long_side"] == long_side >> level
     assert report["num_dense_points"] > 50_000  # measured 186k
     mesh = report["mesh_raw"]
     assert mesh["faces"] > 50_000 and mesh["largest_component_frac"] > 0.9  # measured 298k, 1.0
@@ -334,7 +335,7 @@ class _OomRunner:
 
 
 def _device(args):
-    return int(args[args.index("--cuda-device") + 1])
+    return int(args[args.index("--gpu-device") + 1])
 
 
 def test_oom_retry(tmp_path):
