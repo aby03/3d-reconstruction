@@ -110,7 +110,7 @@ Design points worth knowing:
 pixi run recon run --input data/hotel1
 ```
 
-Run `20261105_093901` on a GTX 1660 Ti (6 GB), `cuda_6gb` preset. All 10 report thresholds pass.
+Run `20261105_093901` on a GTX 1660 Ti (6 GB), `cuda_6gb` preset, with `mesh_post`, `export` and `report` rerun on the current defaults. All 10 report thresholds pass.
 
 | Stage | Time | Result |
 |---|---|---|
@@ -119,11 +119,11 @@ Run `20261105_093901` on a GTX 1660 Ti (6 GB), `cuda_6gb` preset. All 10 report 
 | `sfm` | 927 s | 372 of 375 images registered, 31,566 points, 0.67 px mean reprojection error |
 | `align` | 7 s | gravity residual 0.96 deg (median), floor tilt 0.46 deg |
 | `dense` | 5458 s | 11.6 M dense points, mesh 4.1 M faces, 2.4 M after refine |
-| `mesh_post` | 688 s | 2.0 M faces, 2 texture atlases, 0 % untextured faces, wall RMS 0.02 % of the diagonal |
-| `export` | 106 s | `model.glb` 149.5 MB, cameras re-project within 0.075 px |
-| total | 7284 s (2.0 h) | sum of the stage times |
+| `mesh_post` | 699 s | 2.0 M faces, 2 texture atlases, 0 % untextured faces, wall RMS 0.03 % of the diagonal |
+| `export` | 100 s | `model.glb` 156.1 MB, cameras re-project within 0.075 px |
+| total | 7289 s (2.0 h) | sum of the stage times |
 
-The stage times come from `08_report/summary.json`; the first four stages of this run were produced in earlier invocations of the same run directory (`--resume`) and `dense` finished in 91 min on the OpenMVS `develop` build (the 2.1 build needed about 2.4 times as long for densify alone). The renders below are unretouched: the mesh still has holes where nothing was seen and noisy surfaces on furniture.
+The stage times come from `08_report/summary.json`; the first four stages of this run were produced in earlier invocations of the same run directory (`--resume`) and `dense` finished in 91 min on the OpenMVS `develop` build (the 2.1 build needed about 2.4 times as long for densify alone). The renders below are unretouched: the mesh still has holes where nothing was seen well (floor beside the bed, behind furniture) and noisy surfaces on furniture. Seen from the keyframes, 4.5 % of the surface is missing from the final mesh (`scripts/hole_share.py`).
 
 ![Pipeline stages](results/hotel1/stages.png)
 
@@ -137,7 +137,7 @@ The camera path of the video (camera 1, 320 cameras) seen from above, the sparse
 
 ![Details](results/hotel1/details.png)
 
-Left of each pair a keyframe, right the model rendered from the same camera pose (the poses line up, the holes and the blue gap-fill patches show what is still missing), then the mono depth fit, the SfM track lengths and the SfM reprojection error.
+Left of each pair a keyframe, right the model rendered from the same camera pose (the poses line up; the remaining holes show what is still missing), then the mono depth fit, the SfM track lengths and the SfM reprojection error.
 
 ## Tests
 
