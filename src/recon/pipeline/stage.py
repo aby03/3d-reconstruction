@@ -1,5 +1,6 @@
 """Stage API: what a pipeline step declares (name, directory, scope, upstream, config) and how it runs."""
 
+import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,6 +44,12 @@ class Stage(ABC):
 
     def config_hash(self) -> str:
         return config_hash(self.options, self.hash_inputs())
+
+    def prepare(self) -> None:
+        """Make `self.out` an empty directory before the stage runs (a stage may keep files it reuses)."""
+        if self.out.exists():
+            shutil.rmtree(self.out)
+        self.out.mkdir(parents=True)
 
     @abstractmethod
     def run(self) -> StageOutput:

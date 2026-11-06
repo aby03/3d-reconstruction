@@ -57,6 +57,7 @@ REPORT_KEYS = {
     "tools",
     "peak_vram_mb",
     "disk_mb",
+    "reused_openmvs_steps",
     "timings",
     "warnings",
 }

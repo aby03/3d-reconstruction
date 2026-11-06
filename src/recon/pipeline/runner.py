@@ -1,7 +1,6 @@
 """Runs the selected stages in order, skipping those whose results are up to date."""
 
 import logging
-import shutil
 import time
 import traceback
 from dataclasses import asdict, dataclass, field
@@ -140,9 +139,7 @@ def is_up_to_date(stage: Stage, config_hash: str, upstream: dict[str, str | None
 
 def _run_stage(stage: Stage, config_hash: str, upstream: dict[str, str]) -> StageManifest:
     out = stage.out
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    stage.prepare()
     started, t_start = now_iso(), time.perf_counter()
 
     def manifest(status: str, **fields: Any) -> StageManifest:

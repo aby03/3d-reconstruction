@@ -2,6 +2,8 @@
 world W, in `05_dense/`."""
 
 import dataclasses
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -19,6 +21,8 @@ import trimesh
 from recon.dense import DenseOptions
 from recon.dense.openmvs import (
     DENSIFY,
+    MESH_PLY,
+    PREVIEW_OBJ,
     REFINED_PLY,
     REFINE_MESH,
     DensifyResult,
@@ -48,6 +52,7 @@ from recon.io.tools import ToolRunner
 from recon.mesh.cleanup import cleanup
 from recon.mesh.qa import tau as geometry_tau
 from recon.pipeline.device import Backend
+from recon.pipeline.run_dir import manifest_hash
 from recon.pipeline.stage import Stage, StageOutput, register_stage
 from recon.pipeline.stages import s03_sfm, s04_align
 from recon.report import plots
@@ -386,6 +391,296 @@ def _run_fusion(
     return {"enabled": True, "tau": t, "skipped_views": len(fits) - len(views), **report, "faces_in_box": len(faces)}
 
 
+CHAIN_FILE = "chain.json"  # what the OpenMVS steps leave for the next run: their key and the facts the report needs
+CHAIN_VERSION = 1
+CHAIN_STEPS = ("undistort", "import", "densify", "filter", "mesh", "refine", "preview")
+# kept for a re-run whose OpenMVS inputs are unchanged; everything else of a stage dir is rewritten
+CHAIN_KEEP = [ARTIFACTS["undistorted"], WORK_DIR, "preview", ARTIFACTS["dense_points"], ARTIFACTS["mesh_raw"], ARTIFACTS["mesh_refined"], CHAIN_FILE]
+
+
+@dataclasses.dataclass
+class Chain:
+    """Result of the undistort, OpenMVS and filter steps of the dense stage (everything the later steps use)."""
+
+    urec: pycolmap.Reconstruction
+    cameras: dict[str, Any]
+    long_side: int
+    dense: DensifyResult
+    mesh: MeshResult
+    refined: MeshResult | None
+    preview: MeshResult | None
+    xyz: np.ndarray
+    normals: np.ndarray
+    rgb: np.ndarray
+    num_raw_points: int
+    filter_report: dict[str, Any] | None
+    crop_report: dict[str, Any] | None
+    mesh_ply: Path
+    refined_ply: Path
+    refine_backend: Backend
+    refine_device: int
+    artifacts: dict[str, str]
+    warnings: list[str]
+    timings: dict[str, float]
+    tools: dict[str, dict[str, Any]]
+    vram: list[float]
+    openmvs_version: str | None
+
+
+def _chain_key(options: DenseOptions, align_dir: Path) -> str:
+    """sha1 of what the OpenMVS steps depend on: their options and the aligned model they start from."""
+    data = {
+        "version": CHAIN_VERSION,
+        "options": {k: dataclasses.asdict(getattr(options, k)) for k in ("undistort", "openmvs", "filter", "mesh", "refine", "preview")},
+        "align": manifest_hash(align_dir),
+    }
+    return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _clear_chain(out: Path) -> None:
+    """Remove what an earlier run left of the OpenMVS steps (the tools overwrite files in place, which would write
+    through hard links to another run)."""
+    for rel in CHAIN_KEEP:
+        path = out / rel
+        shutil.rmtree(path) if path.is_dir() else path.unlink(missing_ok=True)
+
+
+def _rel(path: Path | None, out: Path) -> str | None:
+    return None if path is None else os.path.relpath(path, out)
+
+
+def _result_json(r: MeshResult | DensifyResult | None, out: Path) -> dict[str, Any] | None:
+    if r is None:
+        return None
+    d = {"ply": _rel(r.ply, out), "cuda_device": r.cuda_device, "oom_retries": [dataclasses.asdict(x) for x in r.oom_retries]}
+    if isinstance(r, DensifyResult):
+        d |= {"num_points": r.num_points, "effective_level": r.effective_level, "effective_long_side": r.effective_long_side}
+    else:
+        d["timed_out"] = r.timed_out
+    return d
+
+
+def _result_load(d: dict[str, Any] | None, out: Path, dense: bool = False) -> Any:
+    if d is None:
+        return None
+    ply = None if d["ply"] is None else out / d["ply"]
+    retries = [OomRetry(**x) for x in d["oom_retries"]]
+    if dense:
+        return DensifyResult(ply, d["num_points"], d["effective_level"], d["effective_long_side"], d["cuda_device"], retries)
+    return MeshResult(ply, d["cuda_device"], d["timed_out"], retries)
+
+
+def _save_chain(out: Path, key: str, c: Chain) -> None:
+    write_json(
+        {
+            "key": key,
+            "cameras": c.cameras,
+            "long_side": c.long_side,
+            "dense": _result_json(c.dense, out),
+            "mesh": _result_json(c.mesh, out),
+            "refined": _result_json(c.refined, out),
+            "preview": _result_json(c.preview, out),
+            "num_raw_points": c.num_raw_points,
+            "filter_report": c.filter_report,
+            "crop_report": c.crop_report,
+            "mesh_ply": _rel(c.mesh_ply, out),
+            "refined_ply": _rel(c.refined_ply, out),
+            "refine_backend": c.refine_backend,
+            "refine_device": c.refine_device,
+            "artifacts": c.artifacts,
+            "warnings": c.warnings,
+            "timings": c.timings,
+            "tools": c.tools,
+            "vram": c.vram,
+            "openmvs_version": c.openmvs_version,
+        },
+        out / CHAIN_FILE,
+    )
+
+
+def _load_chain(out: Path, key: str) -> Chain | None:
+    """The saved chain of `out` when it was made with `key` and its files are all there, else None."""
+    path = out / CHAIN_FILE
+    if not path.is_file():
+        return None
+    d = read_json(path)
+    if d.get("key") != key or any(not (out / rel).exists() for rel in CHAIN_KEEP):
+        return None
+    dense = _result_load(d["dense"], out, dense=True)
+    work_dir = out / WORK_DIR
+    filtered = work_dir / FILTERED_PLY
+    xyz, normals, rgb, _ = read_openmvs_points(filtered if d["filter_report"] is not None else dense.ply)
+    return Chain(
+        urec=pycolmap.Reconstruction(out / ARTIFACTS["undistorted_model"]),
+        cameras=d["cameras"],
+        long_side=d["long_side"],
+        dense=dense,
+        mesh=_result_load(d["mesh"], out),
+        refined=_result_load(d["refined"], out),
+        preview=_result_load(d["preview"], out),
+        xyz=xyz,
+        normals=normals,
+        rgb=rgb,
+        num_raw_points=d["num_raw_points"],
+        filter_report=d["filter_report"],
+        crop_report=d["crop_report"],
+        mesh_ply=out / d["mesh_ply"],
+        refined_ply=out / d["refined_ply"],
+        refine_backend=d["refine_backend"],
+        refine_device=d["refine_device"],
+        artifacts=d["artifacts"],
+        warnings=d["warnings"],
+        timings=d["timings"],
+        tools=d["tools"],
+        vram=d["vram"],
+        openmvs_version=d["openmvs_version"],
+    )
+
+
+def adopt_chain(out: Path, key: str) -> None:
+    """Write `chain.json` for a finished dense stage dir `out` that has none (made before the steps were reusable),
+    from its report and manifest, so that a run with the same options and aligned model reuses it."""
+    report, manifest = read_json(out / ARTIFACTS["report"]), read_json(out / "stage_manifest.json")
+    if manifest["status"] != "success" or (out / CHAIN_FILE).exists():
+        raise RuntimeError(f"{out}: no finished dense stage, or it already has {CHAIN_FILE}")
+    work = Path(WORK_DIR)
+    retries = report["oom_retries"]
+    cuda = report["cuda_device"]
+    refine = report["refine"]
+    filter_report = {k: v for k, v in report["filter"].items() if k != "enabled"} if report["filter"]["enabled"] else None
+    crop = report["mesh_crop"]
+    mesh_ply = work / (CROPPED_PLY if crop else MESH_PLY)
+    refined_ply = work / REFINED_PLY if refine["ran"] else mesh_ply
+    refined = {"ply": str(work / REFINED_PLY) if refine["ran"] else None, "cuda_device": refine["cuda_device"], "oom_retries": [], "timed_out": refine["timed_out"]}
+    write_json(
+        {
+            "key": key,
+            "cameras": report["undistorted"],
+            "long_side": max(max(c["width"], c["height"]) for c in report["undistorted"].values()),
+            "dense": {
+                "ply": ARTIFACTS["scene_dense_points"], "cuda_device": cuda, "oom_retries": retries,
+                "num_points": report["num_dense_points_raw"], "effective_level": report["densify"]["effective_level"],
+                "effective_long_side": report["densify"]["effective_long_side"],
+            },
+            "mesh": {"ply": str(work / MESH_PLY), "cuda_device": cuda, "oom_retries": [], "timed_out": False},
+            "refined": refined if report["refine"]["enabled"] else None,
+            "preview": (
+                {"ply": f"{PREVIEW_DIR}/{PREVIEW_OBJ}", "cuda_device": cuda, "oom_retries": [], "timed_out": False}
+                if report["preview"]["enabled"] else None
+            ),
+            "num_raw_points": report["num_dense_points_raw"],
+            "filter_report": filter_report,
+            "crop_report": crop,
+            "mesh_ply": str(mesh_ply),
+            "refined_ply": str(refined_ply),
+            "refine_backend": "cuda" if refine["cuda_device"] >= 0 else "cpu",
+            "refine_device": refine["cuda_device"],
+            "artifacts": {k: OPTIONAL_ARTIFACTS[k] for k in ("mesh_refine_openmvs", "preview") if k in manifest["artifacts"]},
+            "warnings": [w for w in manifest["warnings"] if w.startswith(f"{REFINE_MESH} stopped")],
+            "timings": {k: v for k, v in report["timings"].items() if k in CHAIN_STEPS},
+            "tools": report["tools"],
+            "vram": [] if report["peak_vram_mb"] is None else [report["peak_vram_mb"]],
+            "openmvs_version": report["openmvs_version"],
+        },
+        out / CHAIN_FILE,
+    )
+
+
+def _run_chain(
+    model_dir: Path,
+    sfm_dir: Path,
+    out: Path,
+    options: DenseOptions,
+    runner: ToolRunner,
+    backend: Backend,
+    gpu_index: int,
+    cpu_fallback: bool,
+    names: list[str],
+    diag: float,
+    warnings: list[str],
+    timings: dict[str, float],
+) -> Chain:
+    """Undistort, import, densify, filter, mesh, refine and preview; writes `dense_points.ply`, `mesh_raw.ply` and
+    `mesh_refined.ply` too. `warnings` and `timings` collect those of the steps."""
+    chain_warnings, chain_timings, artifacts = [], {}, {}
+    t0 = time.perf_counter()
+    undistorted_dir = out / ARTIFACTS["undistorted"]
+    with colmap_log(runner.log_dir / "colmap.log"):
+        urec = undistort(model_dir, sfm_dir / s03_sfm.IMAGE_ROOT, names, undistorted_dir, options.undistort)
+    keys = camera_keys(urec)
+    cameras = {keys[cid]: camera_intrinsics(cam) for cid, cam in sorted(urec.cameras.items()) if cid in keys}
+    long_side = max(max(c["width"], c["height"]) for c in cameras.values())
+    chain_timings["undistort"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    work_dir = out / WORK_DIR
+    import_colmap(runner, work_dir, undistorted_dir)
+    chain_timings["import"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    device = cuda_device(backend, gpu_index)
+    dense = densify(runner, work_dir, options.openmvs, device, long_side, cpu_fallback)
+    chain_timings["densify"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    xyz, normals, rgb, _ = read_openmvs_points(dense.ply)
+    num_raw_points, filter_report, filtered = len(xyz), None, None
+    if options.filter.enabled:
+        keep, filter_report = filter_points(xyz, diag, options.filter)
+        select_openmvs_points(dense.ply, work_dir / FILTERED_PLY, keep)
+        xyz, normals, rgb = xyz[keep], normals[keep], rgb[keep]
+        filtered = FILTERED_PLY
+    chain_timings["filter"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    mesh = reconstruct_mesh(
+        runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi, cpu_fallback, points=filtered
+    )
+    mesh_ply, crop_report = mesh.ply, None
+    if filter_report is not None and filter_report["box"] is not None:
+        box_room = (np.array(filter_report["box"]["min"]), np.array(filter_report["box"]["max"]))
+        cropped = cleanup(mesh.ply, work_dir / CROPPED_PLY, bounds=box_room)
+        mesh_ply = work_dir / CROPPED_PLY
+        crop_report = {"faces_before": cropped.before["faces"], "faces_after": cropped.after["faces"]}
+    chain_timings["mesh"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    refine_backend: Backend = backend if options.refine.use_cuda else "cpu"
+    refine_device = cuda_device(refine_backend, gpu_index)
+    refined = None
+    if options.refine.enabled:
+        refined = refine_mesh(runner, work_dir, options.refine, refine_device, cpu_fallback, mesh_ply.name)
+        if refined.timed_out:
+            chain_warnings.append(
+                f"{REFINE_MESH} stopped after {options.refine.max_minutes:g} min; mesh_refined.ply is the raw mesh"
+            )
+        else:
+            artifacts["mesh_refine_openmvs"] = OPTIONAL_ARTIFACTS["mesh_refine_openmvs"]
+    refined_ply = refined.ply if refined is not None and refined.ply is not None else mesh_ply
+    shutil.copyfile(refined_ply, out / ARTIFACTS["mesh_refined"])
+    chain_timings["refine"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    preview = None
+    if options.preview.enabled:
+        preview = texture_preview(
+            runner, work_dir, refined_ply.name, out / PREVIEW_DIR, options.preview, device, cpu_fallback
+        )
+        artifacts["preview"] = OPTIONAL_ARTIFACTS["preview"]
+    chain_timings["preview"] = time.perf_counter() - t0
+
+    shutil.copyfile(mesh_ply, out / ARTIFACTS["mesh_raw"])
+    write_points(out / ARTIFACTS["dense_points"], xyz, normals, rgb)
+    warnings += chain_warnings
+    timings.update(chain_timings)
+    return Chain(
+        urec, cameras, long_side, dense, mesh, refined, preview, xyz, normals, rgb, num_raw_points, filter_report,
+        crop_report, mesh_ply, refined_ply, refine_backend, refine_device, artifacts, chain_warnings, chain_timings,
+        tool_rows(runner, out), [r.peak_vram_mb for r in runner.results if r.peak_vram_mb is not None],
+        runner.version(DENSIFY),
+    )
+
+
 def run_dense(
     align_dir: Path,
     sfm_dir: Path,
@@ -418,71 +713,29 @@ def run_dense(
     units = read_json(align_dir / s04_align.ARTIFACTS["transform"])["units"]
     timings["load"] = time.perf_counter() - t0
 
-    t0 = time.perf_counter()
     undistorted_dir = out / ARTIFACTS["undistorted"]
-    with colmap_log(runner.log_dir / "colmap.log"):
-        urec = undistort(model_dir, sfm_dir / s03_sfm.IMAGE_ROOT, names, undistorted_dir, options.undistort)
-    keys = camera_keys(urec)
-    cameras = {keys[cid]: camera_intrinsics(cam) for cid, cam in sorted(urec.cameras.items()) if cid in keys}
-    long_side = max(max(c["width"], c["height"]) for c in cameras.values())
-    timings["undistort"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
     work_dir = out / WORK_DIR
-    import_colmap(runner, work_dir, undistorted_dir)
-    timings["import"] = time.perf_counter() - t0
-
+    key = _chain_key(options, align_dir)
     t0 = time.perf_counter()
-    device = cuda_device(backend, gpu_index)
-    dense = densify(runner, work_dir, options.openmvs, device, long_side, cpu_fallback)
-    timings["densify"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    xyz, normals, rgb, _ = read_openmvs_points(dense.ply)
-    num_raw_points, filter_report, filtered = len(xyz), None, None
-    if options.filter.enabled:
-        keep, filter_report = filter_points(xyz, diag, options.filter)
-        select_openmvs_points(dense.ply, work_dir / FILTERED_PLY, keep)
-        xyz, normals, rgb = xyz[keep], normals[keep], rgb[keep]
-        filtered = FILTERED_PLY
-    timings["filter"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    mesh = reconstruct_mesh(
-        runner, work_dir, options.mesh, device, options.openmvs.crop_to_roi, cpu_fallback, points=filtered
-    )
-    mesh_ply, crop_report = mesh.ply, None
-    if filter_report is not None and filter_report["box"] is not None:
-        box_room = (np.array(filter_report["box"]["min"]), np.array(filter_report["box"]["max"]))
-        cropped = cleanup(mesh.ply, work_dir / CROPPED_PLY, bounds=box_room)
-        mesh_ply = work_dir / CROPPED_PLY
-        crop_report = {"faces_before": cropped.before["faces"], "faces_after": cropped.after["faces"]}
-    timings["mesh"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    refine_backend: Backend = backend if options.refine.use_cuda else "cpu"
-    refine_device = cuda_device(refine_backend, gpu_index)
-    refined = None
-    if options.refine.enabled:
-        refined = refine_mesh(runner, work_dir, options.refine, refine_device, cpu_fallback, mesh_ply.name)
-        if refined.timed_out:
-            warnings.append(
-                f"{REFINE_MESH} stopped after {options.refine.max_minutes:g} min; mesh_refined.ply is the raw mesh"
-            )
-        else:
-            artifacts["mesh_refine_openmvs"] = OPTIONAL_ARTIFACTS["mesh_refine_openmvs"]
-    refined_ply = refined.ply if refined is not None and refined.ply is not None else mesh_ply
-    shutil.copyfile(refined_ply, out / ARTIFACTS["mesh_refined"])
-    timings["refine"] = time.perf_counter() - t0
-
-    t0 = time.perf_counter()
-    preview = None
-    if options.preview.enabled:
-        preview = texture_preview(
-            runner, work_dir, refined_ply.name, out / PREVIEW_DIR, options.preview, device, cpu_fallback
+    chain = _load_chain(out, key)
+    reused = chain is not None
+    if chain is None:
+        _clear_chain(out)
+        chain = _run_chain(
+            model_dir, sfm_dir, out, options, runner, backend, gpu_index, cpu_fallback, names, diag, warnings, timings
         )
-        artifacts["preview"] = OPTIONAL_ARTIFACTS["preview"]
-    timings["preview"] = time.perf_counter() - t0
+        _save_chain(out, key, chain)
+    else:
+        log.info("reusing the OpenMVS steps of %s (same inputs and options)", out)
+        timings.update(chain.timings)
+        timings["reuse"] = time.perf_counter() - t0
+        warnings += chain.warnings
+    urec, cameras, long_side = chain.urec, chain.cameras, chain.long_side
+    dense, mesh, refined, preview = chain.dense, chain.mesh, chain.refined, chain.preview
+    xyz, normals, rgb, num_raw_points = chain.xyz, chain.normals, chain.rgb, chain.num_raw_points
+    filter_report, crop_report, mesh_ply, refined_ply = chain.filter_report, chain.crop_report, chain.mesh_ply, chain.refined_ply
+    refine_backend, refine_device = chain.refine_backend, chain.refine_device
+    artifacts.update(chain.artifacts)
 
     t0 = time.perf_counter()
     mono_report, mono_rows = {"enabled": False}, []
@@ -516,8 +769,6 @@ def run_dense(
     timings["fusion"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    write_points(out / ARTIFACTS["dense_points"], xyz, normals, rgb)
-    shutil.copyfile(mesh_ply, out / ARTIFACTS["mesh_raw"])
     mesh_raw = _mesh_report(read_mesh(out / ARTIFACTS["mesh_raw"]), box)
     ran = refined is not None and refined.ply is not None
     mesh_refined = _mesh_report(read_mesh(out / ARTIFACTS["mesh_refined"]), box) if ran else dict(mesh_raw)
@@ -552,9 +803,7 @@ def run_dense(
     for warning in warnings:
         log.warning(warning)
 
-    tools = tool_rows(runner, out)
-    vram = [r.peak_vram_mb for r in runner.results if r.peak_vram_mb is not None]
-    openmvs_version = runner.version(DENSIFY)
+    tools, vram, openmvs_version = chain.tools, chain.vram, chain.openmvs_version
     o = options.openmvs
     report: dict[str, Any] = {
         "input_model": f"{s04_align.DIR_NAME}/{s04_align.ARTIFACTS['model']}",
@@ -598,6 +847,7 @@ def run_dense(
         "tools": tools,
         "peak_vram_mb": max(vram) if vram else None,
         "disk_mb": {"undistorted": _disk_mb(undistorted_dir), "openmvs": _disk_mb(work_dir)},
+        "reused_openmvs_steps": reused,  # the timings of undistort..preview are then those of the run that made them
         "timings": {k: round(v, 3) for k, v in timings.items()},
         "warnings": warnings,
     }
@@ -652,6 +902,16 @@ class DenseStage(Stage):
 
     def hash_inputs(self) -> dict[str, Any]:
         return {"device": self.ctx.config.device}
+
+    def prepare(self) -> None:
+        """Keep the OpenMVS steps' outputs of an earlier run (`run_dense` reuses them when their inputs are unchanged
+        and clears them otherwise); the rest is removed."""
+        out = self.out
+        if not (out / CHAIN_FILE).is_file():
+            return super().prepare()
+        for path in out.iterdir():
+            if path.name not in CHAIN_KEEP:
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
 
     def run(self) -> StageOutput:
         device = self.ctx.config.device
