@@ -181,6 +181,24 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     stat_std_ratio: 3.0          # ... and the std-devs above the mean neighbour distance that remove a point
     radius_frac: 0.01            # radius filter: radius as a fraction of the diagonal ...
     radius_min_neighbors: 8      # ... and the neighbours a point needs inside it
+  depth_source: mono             # per-keyframe depth for fusion, gap fill and carving: mono (Depth Anything V2 fitted per view) | simplerecon (learned multi-view depth, needs `pixi run -e simplerecon`; falls back to mono when unavailable)
+  simplerecon:                   # SimpleRecon (Niantic, non-commercial licence): metric depth from each view and its best source views; the pose scale is searched
+    scale: null                  # model units per metre; null: search on a sample of views (start: the SfM accelerometer scale, else median SfM depth / typical_depth_m)
+    typical_depth_m: 2.5         # scale search start without an accelerometer scale
+    long_side: 672               # network input long side (multiple of 32); 512 x 896 is 1.7x slower with a finer depth map
+    num_sources: 7               # source views per reference view
+    rotate: false                # turn portrait views to landscape for the network (same agreement, needs another scale)
+    search_views: 16             # views the scale search runs on
+    search_factor: 1.36          # scale grid ratio (7 values, 0.4x-2.5x of the start), then a finer pass around the best
+    search_expand: 3             # shifts of the grid when the best value is at its edge
+    min_fitted_frac: 0.7         # fall back to mono when fewer sampled views agree with the SfM points at the best scale
+    optimal_baseline_m: 0.15     # source views: preferred translation to the reference (metres)
+    min_depth_m: 0.25            # cost-volume depth range (metres); depths outside have no confidence
+    max_depth_m: 5.0
+    edge_rel: 0.05               # depth jumps above this fraction of the depth have no confidence
+    cache_dir: null              # weights download folder; null: as the mono model
+    repo: null                   # SimpleRecon checkout; null: $SIMPLERECON_DIR (set by pixi, `pixi run -e simplerecon fetch-simplerecon`)
+    fp16: false
   mono:                          # Depth Anything V2 small (ONNX, Apache-2.0) depth per keyframe, scale/shift fitted to the SfM points of each view
     enabled: true
     input_long_side: 700         # network input long side (rounded to a multiple of 14); 1857 px keyframes -> 392 x 700 (924: 2x slower, same fit)

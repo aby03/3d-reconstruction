@@ -89,6 +89,7 @@ Design points worth knowing:
 
 - **Stills as a second camera.** Reference stills have about 3x the sharpness of the video frames and join SfM with their own intrinsics (`keyframes.stills`).
 - **Gap filling.** Textureless walls leave the dense cloud empty. Patches of the mono-depth TSDF mesh are added where the OpenMVS mesh has no surface (`mesh_post.fill.*`); an optional weld joins them to the mesh but costs accuracy, so it is off.
+- **Optional learned depth.** `dense.depth_source=simplerecon` replaces the mono depth by SimpleRecon (multi-view, metric; non-commercial licence). Install once with `pixi install -e simplerecon && pixi run -e simplerecon fetch-simplerecon`, then run with `pixi run -e simplerecon recon ... --set dense.depth_source=simplerecon`. The pose scale (model units per metre) is searched on a sample of views, starting from the SfM accelerometer scale or the median SfM depth, and scored against the SfM points; if nothing agrees, or SimpleRecon is missing, the stage falls back to mono depth. Off by default.
 - **No cropping.** The whole reconstruction is kept; the optional room-extent crops (`dense.filter.roi`, `mesh_post.roi`) are off.
 - **Plane regularization.** Floor, ceiling and walls are found from face normals and vertices are snapped onto them (`mesh_post.planes.*`).
 - **Seam leveling** needs an OpenMVS build with the seam-leveling fix (`mesh_post.texture.seam_leveling`); the `develop` build has it, release 2.4.0 turns textures black.

@@ -35,6 +35,10 @@ from recon.dense.filter import filter_points
 from recon.dense.fusion import FusionOptions, FusionView, fuse
 from recon.dense.mono import (
     MonoDepth, MonoOptions, ViewFit, fetch_model, fit_to_mesh, fit_view, fitted_depth, median_rel_residual, mesh_depth,
+    view_points,
+)
+from recon.dense.simplerecon import (
+    DepthRunner, SimpleReconError, SimpleReconOptions, check_installed, fetch_weights, find_scale, start_scale,
 )
 from recon.dense.undistort import undistort
 from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
@@ -157,17 +161,6 @@ def _backend(result: DensifyResult | MeshResult | None, backend: Backend) -> Bac
     return "cpu" if result is not None and result.cuda_device < 0 else backend
 
 
-def _view_points(rec: pycolmap.Reconstruction, image: pycolmap.Image) -> tuple[np.ndarray, np.ndarray]:
-    """Pixels (N, 2) and depths (N,) of the SfM points `image` observes, in front of its camera."""
-    obs = [(p.xy, rec.points3D[p.point3D_id].xyz) for p in image.points2D if p.has_point3D()]
-    if not obs:
-        return np.zeros((0, 2)), np.zeros(0)
-    uv, xyz = np.array([o[0] for o in obs]), np.array([o[1] for o in obs])
-    cam = image.cam_from_world().matrix()
-    z = xyz @ cam[2, :3] + cam[2, 3]
-    return uv[z > 0], z[z > 0]
-
-
 def _mesh_scene(path: Path) -> o3d.t.geometry.RaycastingScene:
     mesh = read_mesh(path)
     scene = o3d.t.geometry.RaycastingScene()
@@ -208,7 +201,7 @@ def _run_mono(
     for image in sorted(rec.images.values(), key=lambda im: im.name):
         bgr = cv2.imread(str(images_dir / image.name))
         disparity = net.predict(bgr)
-        uv, z = _view_points(rec, image)
+        uv, z = view_points(rec, image)
         h, w = bgr.shape[:2]
         fit = fit_view(disparity, uv * np.array([disparity.shape[1] / w, disparity.shape[0] / h]), z, options)
         correction = None
@@ -240,8 +233,10 @@ def _run_mono(
     ratio = np.array([f.inlier_ratio for f in fitted])
     summary = {
         "enabled": True,
+        "source": "mono",
         "model": source,
         "provider": net.provider,
+        "backend": "cuda" if net.provider == "CUDAExecutionProvider" else "cpu",
         "input_long_side": options.input_long_side,
         "views": len(fits),
         "fitted": len(fitted),
@@ -250,6 +245,90 @@ def _run_mono(
         "median_rel_residual": {"median": float(np.median(res)), "max": float(res.max())} if len(res) else None,
         "inlier_ratio": {"median": float(np.median(ratio)), "min": float(ratio.min())} if len(ratio) else None,
         "timings": {k: round(v, 3) for k, v in timings.items()},
+        "example": example[0] if example else None,
+    }
+    if example:
+        plots.plot_mono_example(example[1], example[2], example[3], out / MONO_ARTIFACTS["plot_mono_example"])
+    plots.plot_mono_fit(res, ratio, out / MONO_ARTIFACTS["plot_mono_fit"])
+    return summary, rows
+
+
+def _accelerometer_scale(sfm_dir: Path, align_dir: Path) -> float | None:
+    """Model units (of the aligned model) per metre from the SfM stage's accelerometer check, None without one."""
+    report = read_json(sfm_dir / s03_sfm.ARTIFACTS["report"])
+    median = ((report.get("motion") or {}).get("scale") or {}).get("median")
+    if not median:
+        return None
+    return float(median) * float(read_json(align_dir / s04_align.ARTIFACTS["transform"])["W_from_sfm"]["scale"])
+
+
+def _run_simplerecon(
+    rec: pycolmap.Reconstruction,
+    images_dir: Path,
+    out: Path,
+    options: SimpleReconOptions,
+    mono_options: MonoOptions,
+    use_cuda: bool,
+    accelerometer: float | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """SimpleRecon depth of every keyframe of the undistorted model `rec` (scale searched on a sample of views unless
+    `options.scale` is set); each view's depth and confidence go to `out/mono/<image>.npz`, the layout of the mono
+    depth, and its agreement with the SfM points is its row. Returns the summary and one row per view; raises
+    `SimpleReconError` when no scale makes the depth agree with the SfM points."""
+    check_installed(options)
+    import torch
+
+    device = "cuda" if use_cuda and torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    t0 = time.perf_counter()
+    weights = fetch_weights(options)[1]
+    runner = DepthRunner(rec, images_dir, options, device, mono_options)
+    start, start_source, curve = None, "given", []
+    if options.scale:
+        scale = options.scale
+    else:
+        start, start_source = start_scale(rec, accelerometer, options)
+        scale, curve = find_scale(runner, start, options)
+    t_search = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    rows, fits, example = [], {}, None
+    for i, name in enumerate(runner.names):
+        result = runner.depth(i, scale)
+        fits[name] = result.fit
+        if result.fit.fitted:
+            write_npz(
+                out / MONO_ARTIFACTS["mono"] / Path(name).with_suffix(".npz"),
+                True,
+                depth=result.depth.astype(np.float16),
+                confidence=result.confidence,
+            )
+            if example is None:
+                example = (name, cv2.imread(str(images_dir / name)), result.depth, result.confidence)
+        rows.append({"image": name, **dataclasses.asdict(result.fit)})
+    fitted = [f for f in fits.values() if f.fitted]
+    res = np.array([f.median_rel_residual for f in fitted])
+    ratio = np.array([f.inlier_ratio for f in fitted])
+    summary = {
+        "enabled": True,
+        "source": "simplerecon",
+        "model": weights,
+        "backend": device,
+        "scale": scale,
+        "scale_source": start_source,
+        "scale_start": start,
+        "accelerometer_scale": accelerometer,
+        "scale_search": curve,
+        "views": len(fits),
+        "fitted": len(fitted),
+        "mesh_fitted": 0,
+        "skipped": {n: f.reason for n, f in fits.items() if not f.fitted},
+        "median_rel_residual": {"median": float(np.median(res)), "max": float(res.max())} if len(res) else None,
+        "inlier_ratio": {"median": float(np.median(ratio)), "min": float(ratio.min())} if len(ratio) else None,
+        "seconds_per_view": round(float(np.mean(runner.seconds)), 3),
+        "peak_vram_gb": round(runner.peak_vram_gb(), 2),
+        "input_sizes": [f"{w}x{h}" for w, h in runner.nets],
+        "timings": {"search": round(t_search, 3), "predict": round(time.perf_counter() - t0, 3)},
         "example": example[0] if example else None,
     }
     if example:
@@ -407,8 +486,18 @@ def run_dense(
 
     t0 = time.perf_counter()
     mono_report, mono_rows = {"enabled": False}, []
-    if options.mono.enabled:
+    if options.depth_source == "simplerecon":
+        try:
+            mono_report, mono_rows = _run_simplerecon(
+                urec, undistorted_dir / "images", out, options.simplerecon, options.mono, backend == "cuda",
+                _accelerometer_scale(sfm_dir, align_dir),
+            )
+        except (SimpleReconError, ImportError, RuntimeError, OSError) as e:
+            warnings.append(f"SimpleRecon depth: {e}; using the mono depth")
+            shutil.rmtree(out / MONO_ARTIFACTS["mono"], ignore_errors=True)
+    if not mono_rows and options.mono.enabled:
         mono_report, mono_rows = _run_mono(urec, undistorted_dir / "images", out, options.mono, backend == "cuda", refined_ply)
+    if mono_rows:
         write_csv(pd.DataFrame(mono_rows), out / MONO_ARTIFACTS["mono_fit"], MONO_COLUMNS)
         artifacts.update(MONO_ARTIFACTS)
     timings["mono"] = time.perf_counter() - t0
@@ -443,11 +532,12 @@ def run_dense(
         warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {num_raw_points}")
     retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
     warnings += [retry_warning(r) for r in retries]
-    if options.mono.enabled:
-        warnings += [f"mono depth: {n} not fitted: {why}" for n, why in mono_report["skipped"].items()]
+    if mono_report["enabled"]:
+        label = f"{mono_report['source']} depth"
+        warnings += [f"{label}: {n} not fitted: {why}" for n, why in mono_report["skipped"].items()]
         worst = (mono_report["median_rel_residual"] or {}).get("max", 0.0)
         if worst > options.mono.max_median_residual:
-            warnings.append(f"mono depth: a view has median relative residual {worst:.1%} (> {options.mono.max_median_residual:.0%})")
+            warnings.append(f"{label}: a view has median relative residual {worst:.1%} (> {options.mono.max_median_residual:.0%})")
     meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
     for name, stats in [("dense cloud", dense_stats), *meshes]:
         frac = stats["inside_sparse_bbox_frac"]
@@ -529,8 +619,8 @@ def run_dense(
         backends["refine"] = _backend(refined, refine_backend)
     if preview is not None:
         backends["texture"] = _backend(preview, backend)
-    if options.mono.enabled:
-        backends["mono"] = "cuda" if mono_report["provider"] == "CUDAExecutionProvider" else "cpu"
+    if mono_report["enabled"]:
+        backends["mono"] = mono_report["backend"]
     return StageOutput(
         artifacts=artifacts,
         metrics={
@@ -539,6 +629,7 @@ def run_dense(
             "mesh_refined_faces": mesh_refined["faces"],
             "inside_sparse_bbox_frac": dense_stats["inside_sparse_bbox_frac"],
             "largest_component_frac": mesh_raw["largest_component_frac"],
+            "depth_source": mono_report.get("source"),
             "mono_views_fitted": mono_report.get("fitted"),
             "densify_s": round(timings["densify"], 1),
             "refine_s": round(timings["refine"], 1),
