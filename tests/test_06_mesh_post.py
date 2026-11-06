@@ -332,3 +332,35 @@ def test_plane_fill_closes_an_enclosed_hole(tmp_path):
     filled = trimesh.load(out, process=False, force="mesh")
     assert report["holes"] == report["holes_filled"] == 1 and report["cells_added"] > 100
     assert len(filled.faces) == len(faces) + 2 * report["cells_added"] and np.allclose(filled.vertices[:, 2], 0)
+
+
+def test_hole_share_counts_a_hole_and_ignores_points_behind(tmp_path):
+    """A camera looks at a wall with a hole: the hole share is the hole's share of the view, for the mesh and for
+    points sampled on it; geometry behind the reference depth counts as a hole."""
+    from recon.mesh.coverage import CoverageOptions, RefView, hole_share
+
+    n, size = 40, 4.0
+    xs = np.linspace(-size / 2, size / 2, n + 1)
+    X, Y = np.meshgrid(xs, xs)
+    vertices = np.c_[X.ravel(), Y.ravel(), np.full(X.size, 2.0)]  # wall at z = 2 in front of a camera at the origin
+    faces = []
+    for i in range(n):
+        for j in range(n):
+            a = i * (n + 1) + j
+            if not (15 <= i < 25 and 15 <= j < 25):  # 1 x 1 hole in the middle
+                faces += [[a, a + 1, a + n + 2], [a, a + n + 2, a + n + 1]]
+    wall = tmp_path / "wall.ply"
+    trimesh.Trimesh(vertices, faces, process=False).export(wall)
+    far = tmp_path / "far.ply"
+    trimesh.Trimesh(vertices + [0, 0, 1.0], faces, process=False).export(far)  # the same wall at z = 3
+    points = tmp_path / "points.ply"
+    trimesh.PointCloud(trimesh.Trimesh(vertices, faces, process=False).sample(400_000, seed=0)).export(points)
+
+    w = 100  # a 100 px view whose frustum spans the 4 x 4 wall at depth 2: the hole is 1/16 of it
+    K = np.array([[w / 2, 0, w / 2], [0, w / 2, w / 2], [0, 0, 1.0]])
+    view = RefView("v", np.full((w, w), 2.0, np.float32), K, np.eye(4))
+    shares, masks = hole_share([view], {"mesh": wall, "points": points, "far": far}, CoverageOptions(), keep=[0])
+    assert abs(shares["mesh"] - 1 / 16) < 0.01
+    assert abs(shares["points"] - 1 / 16) < 0.02
+    assert shares["far"] == 1.0
+    assert masks[0]["mesh"][w // 2, w // 2] and not masks[0]["mesh"][5, 5]
