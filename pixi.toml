@@ -44,6 +44,7 @@ recon = "python -m recon.pipeline.cli"
 
 [activation.env]
 PYTHONPATH = "${PIXI_WORKSPACE_ROOT}"
+SIMPLERECON_DIR = "${PIXI_WORKSPACE_ROOT}/.local/simplerecon"
 PATH = "${PIXI_WORKSPACE_ROOT}/.local/openmvs/bin/OpenMVS:${PATH}"
 
 # --- OpenMVS (CUDA) build: `pixi run -e build openmvs` -----------------------
@@ -110,5 +111,19 @@ openmvs-build = "cmake --build build/openmvs --parallel"
 openmvs-install = "cmake --install build/openmvs"
 openmvs = { depends-on = ["mvs-deps", "halfmesh", "openmvs-patch", "openmvs-configure", "openmvs-build", "openmvs-install"] }
 
+[feature.simplerecon.tasks]
+fetch-simplerecon = "python -m recon.dense.simplerecon fetch"
+
+[feature.simplerecon.dependencies]
+kornia = "*"
+einops = "*"
+
+[feature.simplerecon.pypi-dependencies]
+timm = "*"
+pytorch-lightning = "*"
+torchvision = "*"
+antialiased-cnns = "*"
+
 [environments]
 build = { features = ["build"], no-default-feature = true }
+simplerecon = { features = ["simplerecon"] }

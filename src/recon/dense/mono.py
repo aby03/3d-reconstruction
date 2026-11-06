@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import open3d as o3d
+import pycolmap
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +123,17 @@ class MonoDepth:
         rgb = cv2.cvtColor(cv2.resize(image_bgr, size, interpolation=cv2.INTER_CUBIC), cv2.COLOR_BGR2RGB)
         x = ((rgb.astype(np.float32) / 255.0 - IMAGE_MEAN) / IMAGE_STD).transpose(2, 0, 1)[None]
         return self.session.run(None, {"pixel_values": x})[0][0].astype(np.float32)
+
+
+def view_points(rec: pycolmap.Reconstruction, image: pycolmap.Image) -> tuple[np.ndarray, np.ndarray]:
+    """Pixels (N, 2) and depths (N,) of the SfM points `image` observes, in front of its camera."""
+    obs = [(p.xy, rec.points3D[p.point3D_id].xyz) for p in image.points2D if p.has_point3D()]
+    if not obs:
+        return np.zeros((0, 2)), np.zeros(0)
+    uv, xyz = np.array([o[0] for o in obs]), np.array([o[1] for o in obs])
+    cam = image.cam_from_world().matrix()
+    z = xyz @ cam[2, :3] + cam[2, 3]
+    return uv[z > 0], z[z > 0]
 
 
 def fit_view(
