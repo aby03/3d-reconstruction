@@ -286,6 +286,9 @@ def point_agreement(
 
 
 
+ERROR_CAP = 0.2  # relative error of a view that does not fit, and the most any view adds to a scale's score
+
+
 class SimpleReconError(RuntimeError):
     """SimpleRecon cannot be used on this input (not installed, or no metric scale makes it agree with the SfM)."""
 
@@ -440,7 +443,8 @@ def find_scale(
     runner: DepthRunner, start: float, options: SimpleReconOptions
 ) -> tuple[float, list[dict[str, float]]]:
     """`search_scale` on `options.search_views` evenly spaced views of `runner`, scored by the median over them of each
-    view's median relative error against its SfM points (misses count as infinite). Raises `SimpleReconError` when
+    view's median relative error against its SfM points: the mean over them with each view's error capped at
+    `ERROR_CAP` and views that do not fit counted at the cap, so a scale that loses views cannot win. Raises `SimpleReconError` when
     fewer than `min_fitted_frac` of the views fit at the best scale."""
     usable = [i for i, im in enumerate(runner.images) if im.num_points3D >= runner.mono.min_points]
     if not usable:
@@ -449,8 +453,8 @@ def find_scale(
 
     def score(s: float) -> tuple[float, float]:
         fits = [runner.depth(i, s).fit for i in picks]
-        err = np.array([f.median_rel_residual_all for f in fits])
-        return float(np.nanmedian(err)) if np.isfinite(err).any() else float("inf"), float(np.mean([f.fitted for f in fits]))
+        err = np.array([f.median_rel_residual_all if f.fitted else np.inf for f in fits])
+        return float(np.mean(np.minimum(err, ERROR_CAP))), float(np.mean([f.fitted for f in fits]))
 
     best, curve = search_scale(score, start, options)
     fitted = next(c["fitted"] for c in curve if c["scale"] == best)
