@@ -22,6 +22,7 @@ class ConsistencyOptions:
     min_face_frac: float = 0.5  # a view sees a face as free space when this share of the face's pixels is
     min_views: int = 3  # a face is removed when at least this many views see it as free space
     unsupported_tau: float = 2.0  # only faces farther than this many tau from every dense point can be removed
+    fused_tau: float = 2.0  # ... and farther than this many tau from the fused mono-depth (TSDF) surface; 0: off
     min_inlier_ratio: float = 0.7  # only views whose mono depth fits the SfM points at least this well count ...
     max_residual: float = 0.05  # ... with a median relative residual of at most this
 
@@ -72,6 +73,14 @@ def free_space_votes(
     return seen, free
 
 
+def surface_distance(mesh: Path, points: np.ndarray) -> np.ndarray:
+    """Distance from each of `points` (N, 3) to the surface of `mesh`."""
+    m = read_mesh(mesh)
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.core.Tensor(np.asarray(m.vertices), o3d.core.float32), o3d.core.Tensor(np.asarray(m.faces), o3d.core.uint32))
+    return scene.compute_distance(o3d.core.Tensor(np.asarray(points), o3d.core.float32)).numpy()
+
+
 def remove_free_space(
     src: Path,
     out: Path,
@@ -79,10 +88,12 @@ def remove_free_space(
     views: list[ConsistencyView],
     tau: float,
     options: ConsistencyOptions | None = None,
+    fused: Path | None = None,
 ) -> dict[str, Any]:
     """Write to `out` the mesh `src` without the faces that `options.min_views` views see as free space and
     whose centroid is farther than `unsupported_tau`·tau from every point of `points` (faces backed by dense
-    points stay). Returns the counts."""
+    points stay) and, with `fused` and `fused_tau` > 0, farther than `fused_tau`·tau from the surface of the mesh
+    `fused` (the depth maps fused over many views outvote a single view's depth). Returns the counts."""
     options = options or ConsistencyOptions()
     mesh = read_mesh(src)
     vertices, faces = np.asarray(mesh.vertices), np.asarray(mesh.faces)
@@ -90,7 +101,10 @@ def remove_free_space(
     limit = options.unsupported_tau * tau
     unsupported = cKDTree(points).query(mesh.triangles_center, distance_upper_bound=limit)[0] > limit
     flagged = free >= options.min_views
-    remove = flagged & unsupported
+    on_fused = np.zeros(len(faces), bool)
+    if fused is not None and options.fused_tau > 0 and fused.is_file():
+        on_fused = surface_distance(fused, mesh.triangles_center) <= options.fused_tau * tau
+    remove = flagged & unsupported & ~on_fused
     area = mesh.area_faces
     report = {
         "views": len(views),
@@ -100,6 +114,7 @@ def remove_free_space(
         "removed": int(remove.sum()),
         "removed_area_frac": float(area[remove].sum() / area.sum()) if area.sum() > 0 else 0.0,
         "kept_supported": int((flagged & ~unsupported).sum()),
+        "kept_fused": int((flagged & unsupported & on_fused).sum()),
     }
     kept = trimesh.Trimesh(vertices, faces[~remove], process=False)
     kept.remove_unreferenced_vertices()

@@ -16,7 +16,7 @@ from recon.mesh.cleanup import save
 
 @dataclass(slots=True)
 class HoleOptions:
-    small_hole_max_edges: int = 100  # loops with at most this many edges are closed
+    small_hole_max_edges: int = 1000  # loops with at most this many edges are closed
     max_loop_perimeter_frac: float = 0.3  # loops longer than this fraction of the bbox perimeter are the outer boundary
 
 

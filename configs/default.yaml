@@ -255,8 +255,8 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     overlap_tau: 2.0             # patches grow by this many tau beyond gap_tau, so they overlap the mesh
     weld: false                  # drop the mesh faces under a patch's overlap and join the mesh to the patch along the cut
     weld_tau: 1.0                # border vertices of mesh and patch closer than this many tau are merged
-  holes:                         # close small boundary loops (tiny and room2 have only the outer one)
-    small_hole_max_edges: 100
+  holes:                         # close boundary loops up to a size (the outer boundary stays open)
+    small_hole_max_edges: 1000   # hotel1: 100 left 113 holes open, 1000 leaves 1
     max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary
   consistency:                   # remove unsupported faces that keyframes see through (mesh depth vs fitted mono depth, Open3D ray casting), after hole filling
     enabled: true
@@ -266,6 +266,7 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     min_face_frac: 0.5           # a view sees a face as free space when this share of its pixels in that view is
     min_views: 3                 # removed when at least this many views see it as free space
     unsupported_tau: 2.0         # only faces farther than this many tau from every dense point can be removed
+    fused_tau: 2.0               # keep faces within this many tau of the fused mono-depth surface (mesh_tsdf.ply), which single views outvote by noise; 0: off
     min_inlier_ratio: 0.7        # only views whose mono depth fits the SfM points this well count ...
     max_residual: 0.05           # ... with a median relative residual of at most this
   planes:                        # snap walls/floor/ceiling flat, straighten their edges (room2: 19 planes, 35% of the area)
@@ -297,7 +298,7 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
   decimate:
     texture_face_budget: 2000000 # quadric decimation above this many faces (600k before: coarse on 1080p stills)
     planar_quadric: true
-  texture:                       # TextureMesh; seam leveling needs the patched OpenMVS build (unpatched 2.4.0: 41% black texels on tiny)
+  texture:                       # TextureMesh (OpenMVS develop: seam leveling fixed upstream; 2.4.0 gave 41% black texels on tiny)
     resolution_level: 0          # full-resolution keyframes (tiny: 9 s, one 4096^2 atlas; level 1: 8 s, 2048^2)
     min_resolution: 640
     max_texture_size: 8192       # larger atlases are split into several textures
@@ -311,6 +312,7 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
     gutter_px: 8
     jpeg_quality: 95             # PNG would be 4.3x the bytes (tiny 6.9 vs 1.6 MB)
     fill_k: 8                    # dense points averaged per face
+    color_step: 8                # untextured faces whose colours round to the same multiple of this share one colour cell
 
 export:                          # step 7: model.glb (Y up, textures embedded) + model_preview.glb + obj/ (Z up) + metadata.json
   preview_faces: 300000          # model_preview.glb: textured mesh decimated to this many faces (0: none)

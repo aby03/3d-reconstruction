@@ -165,6 +165,7 @@ def run_mesh_post(
                 [ConsistencyView(*v) for v in views],
                 t,
                 c,
+                tsdf,
             ),
         }
         # faces removed can leave floating pieces

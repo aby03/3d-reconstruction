@@ -1,6 +1,6 @@
 """Texture fixes on OpenMVS's atlases. TextureMesh gives every face no view saw one shared UV point on an empty
-(magenta) texel; each such face gets its own colour cell in the atlas's empty space instead, coloured like the dense
-points around the face. Empty texels inside textured faces' UV triangles get the same kind of colour. The texels of
+(magenta) texel; each such face gets a colour cell in the atlas's empty space instead, coloured like the dense
+points around the face (faces of the same quantized colour share a cell). Empty texels inside textured faces' UV triangles get the same kind of colour. The texels of
 the faces' UV triangles then bleed into the empty space around them (gutters, so bilinear filtering and mipmaps don't
 pull in the empty colour), the rest of the empty space gets the mean colour, and the MTL is made opaque."""
 
@@ -27,6 +27,7 @@ class TextureFixOptions:
     gutter_px: int = 8
     jpeg_quality: int = 95  # PNG would be ~4x the bytes
     fill_k: int = 8  # dense points averaged per face
+    color_step: int = 8  # untextured faces whose colours round to the same multiple of this share a colour cell
 
 
 def _pixel_triangles(uv: np.ndarray, faces: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -95,7 +96,7 @@ def fix_atlas(
 ) -> tuple[np.ndarray, dict[int, np.ndarray], dict[str, Any]]:
     """Fix one atlas (H, W, 3) whose faces have the UV indices `faces` (F, 3) into `uv`. `colors` gives the fill
     colour of faces (None: nothing is filled). Returns the image, the new UV (u, v) of each untextured face that got
-    a colour cell, and `{filled_faces (untextured faces given a colour cell), filled_texels (empty texels filled inside
+    a colour cell, and `{filled_faces (untextured faces given a colour cell), colour_cells, filled_texels (empty texels filled inside
     textured faces), unfilled_faces (untextured faces left: no free cell), sentinel_in_faces}`."""
     h, w = image.shape[:2]
     image = image.copy()
@@ -123,19 +124,33 @@ def fix_atlas(
     image, grown = _dilate(image, used, options.gutter_px)
 
     cells: dict[int, np.ndarray] = {}
+    palette_size = 0
     pending = np.flatnonzero(untextured)
     if colors is not None and len(pending):
-        free = _free_cells(~grown)[: len(pending)]
-        chosen = pending[: len(free)]
-        for (x, y), color in zip(free, np.clip(np.round(colors(chosen)), 0, 255).astype(np.uint8)):
+        # faces of the same quantized colour share one cell; the step doubles until the palette fits the free space
+        free = _free_cells(~grown)
+        rgb = np.clip(np.round(colors(pending)), 0, 255).astype(int)
+        step = max(1, options.color_step)
+        while True:
+            quantized = np.minimum((rgb // step) * step + step // 2, 255)
+            palette, which = np.unique(quantized, axis=0, return_inverse=True)
+            which = which.reshape(-1)
+            if len(palette) <= len(free) or step >= 128:
+                break
+            step *= 2
+        palette_size = min(len(palette), len(free))
+        for (x, y), color in zip(free[:palette_size], palette[:palette_size].astype(np.uint8)):
             image[y : y + CELL_PX, x : x + CELL_PX] = color
             grown[y : y + CELL_PX, x : x + CELL_PX] = True
-        centre = (free + CELL_PX / 2) / [w, h]
-        cells = {int(f): np.array([u, 1.0 - v]) for f, (u, v) in zip(chosen, centre)}
+        centre = (free[:palette_size] + CELL_PX / 2) / [w, h]
+        cells = {
+            int(f): np.array([centre[k, 0], 1.0 - centre[k, 1]]) for f, k in zip(pending, which) if k < palette_size
+        }
     if (~grown).any():
         image[~grown] = np.round(image[used].reshape(-1, 3).mean(axis=0)).astype(np.uint8)
     stats = {
         "filled_faces": len(cells),
+        "colour_cells": palette_size,
         "filled_texels": filled_texels,
         "unfilled_faces": int(untextured.sum()) - len(cells),
         "sentinel_in_faces": int((covered & _is_sentinel(image)).sum()),
@@ -202,7 +217,7 @@ def fix_textures(
 
         return colors
 
-    totals = {"filled_faces": 0, "filled_texels": 0, "unfilled_faces": 0, "sentinel_in_faces": 0}
+    totals = {"filled_faces": 0, "colour_cells": 0, "filled_texels": 0, "unfilled_faces": 0, "sentinel_in_faces": 0}
     cells = {}
     for name, idx in per_material.items():
         image = cv2.imread(str(textured_dir / maps[name]))
