@@ -129,6 +129,11 @@ def _angle_deg(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.degrees(np.arccos(np.clip(a @ b, -1.0, 1.0))))
 
 
+def _axis_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    """Angle between the lines of two normals (opposite normals are parallel planes: 0)."""
+    return float(np.degrees(np.arccos(np.clip(abs(a @ b), 0.0, 1.0))))
+
+
 def detect_planes(
     mesh: trimesh.Trimesh, tau: float, options: PlaneOptions | None = None, weights: np.ndarray | None = None
 ) -> tuple[list[dict[str, Any]], np.ndarray]:
@@ -268,7 +273,7 @@ def _snap(
         chosen = [cands[0]]
         if options.straighten_edges:
             for i in cands[1:]:
-                if all(_angle_deg(normals[i], normals[j]) >= MIN_PAIR_ANGLE_DEG for j in chosen):
+                if all(_axis_angle_deg(normals[i], normals[j]) >= MIN_PAIR_ANGLE_DEG for j in chosen):
                     chosen.append(i)
                     if len(chosen) == 3:
                         break
