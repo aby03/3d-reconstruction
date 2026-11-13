@@ -26,3 +26,13 @@ def test_only_uncovered_surface_is_added():
 def test_depth_seen_by_one_view_is_dropped():
     points, *_ = fill_points(np.zeros((0, 3)), [view(0.0)], diag=4.0, tau=0.1, options=FillOptions())
     assert len(points) == 0
+
+
+def test_grazing_surface_is_dropped():
+    tilted = view(0.0)
+    z = np.zeros((100, 100), np.float32)
+    z[:, :40] = 2.0 * 1.05 ** np.arange(40)  # depth grows 5% per pixel: seen at about 79 degrees
+    tilted.depth = z
+    steep, *_ = fill_points(np.zeros((0, 3)), [tilted, tilted], diag=40.0, tau=0.1, options=FillOptions())
+    flat, *_ = fill_points(np.zeros((0, 3)), [view(0.0), view(0.0)], diag=40.0, tau=0.1, options=FillOptions())
+    assert len(steep) < 0.2 * len(flat)
