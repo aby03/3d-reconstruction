@@ -96,6 +96,24 @@ def time_pairs(names: list[str], overlap: int, quadratic: bool) -> list[tuple[st
     return sorted({(names[i], names[i + o]) for i in range(len(names)) for o in offsets if i + o < len(names)})
 
 
+def sequential_pairs(names: list[str], overlap: int, quadratic: bool) -> list[tuple[str, str]]:
+    """Pairs of images that are neighbours in name order (COLMAP's sequential matching without loop detection)."""
+    return time_pairs(sorted(names), overlap, quadratic)
+
+
+def candidate_pairs(
+    names: list[str], strategy: str, options: MatchingOptions, images: pd.DataFrame | None = None
+) -> list[tuple[str, str]]:
+    """The image pairs `strategy` (as from `resolve_strategy`) matches: all pairs, time neighbours (`images` needs
+    `image_name, sequence_id, t_ns`; without it name-order neighbours) or name-order neighbours."""
+    if strategy == "exhaustive":
+        ordered = sorted(names)
+        return [(a, b) for i, a in enumerate(ordered) for b in ordered[i + 1 :]]
+    if strategy == "time" and images is not None:
+        return time_pairs(time_order(images), options.overlap, options.quadratic_overlap)
+    return sequential_pairs(names, options.overlap, options.quadratic_overlap)
+
+
 def _query_images(images: pd.DataFrame, period: int) -> list[str]:
     """Images that look for loop closures: every `period`-th image of the camera with most images in a sequence, and
     every image of the other cameras (stills are few and each is worth anchoring)."""
@@ -118,12 +136,16 @@ def match_features(
     vocab_tree: Path | None = None,
     images: pd.DataFrame | None = None,
     work_dir: Path | None = None,
+    feature_type: str = "sift",
 ) -> str:
     """Match and verify image pairs in `database`; returns the strategy used. Relative poses are always computed.
 
     `time` needs `images` (`image_name, sequence_id, t_ns`) and a `work_dir` for its pair lists; without them it
     runs as `sequential`. With `vocab_tree`, `time` and `sequential` also detect loops (`options.loop_detection*`).
+    `feature_type` `aliked` matches with COLMAP's ALIKED LightGlue (no loop detection: the vocab tree is SIFT-only).
     """
+    if feature_type == "aliked":
+        vocab_tree = None
     strategy = resolve_strategy(num_images, options)
     if strategy == "time" and (images is None or work_dir is None):
         strategy = "sequential"
@@ -131,6 +153,8 @@ def match_features(
     matching.use_gpu = use_gpu
     matching.gpu_index = str(gpu_index)
     matching.max_num_matches = options.max_num_matches
+    if feature_type == "aliked":
+        matching.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
     verification = pycolmap.TwoViewGeometryOptions()
     verification.min_num_inliers = options.min_num_inliers
     verification.compute_relative_pose = True

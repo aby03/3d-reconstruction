@@ -54,7 +54,8 @@ keyframes:
 sfm:
   initial_camera_model: SIMPLE_RADIAL  # COLMAP model the mapper estimates; one camera per sequence image folder
   features:
-    type: sift
+    type: sift                   # sift | aliked (COLMAP's ALIKED + LightGlue, models downloaded once) | disk | superpoint (LightGlue, needs `pixi run -e lightglue recon ...`); no loop detection except for sift
+    aliked_model: n16rot         # aliked: n16rot (rotation robust) | n32
     max_num_features: 8192
     max_image_size: 1920         # long side the images are scaled to for extraction
     domain_size_pooling: false   # true is better on low texture but forces COLMAP's CPU SIFT

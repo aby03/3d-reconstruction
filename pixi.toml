@@ -124,6 +124,10 @@ pytorch-lightning = "*"
 torchvision = "*"
 antialiased-cnns = "*"
 
+[feature.lightglue.pypi-dependencies]
+lightglue = { git = "https://github.com/cvg/LightGlue.git", rev = "5a650c444718caffc2669dc0094cde908f42dd73" }  # DISK / SuperPoint + LightGlue for sfm.features.type
+
 [environments]
 build = { features = ["build"], no-default-feature = true }
 simplerecon = { features = ["simplerecon"] }
+lightglue = { features = ["lightglue"] }

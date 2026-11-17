@@ -30,6 +30,8 @@ REPORT_KEYS = {
     "median_track_len",
     "mean_track_len",
     "num_verified_pairs",
+    "feature_type",
+    "matcher",
     "matching_strategy",
     "loop_detection",
     "mapper_used",

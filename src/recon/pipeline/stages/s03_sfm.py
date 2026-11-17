@@ -18,9 +18,10 @@ from recon.pipeline.stages import s02_keyframes
 from recon.pipeline.stages.common import gravity_vectors, read_keyframe_inputs
 from recon.report import plots
 from recon.sfm import SfmOptions
-from recon.sfm.features import extract_features
+from recon.sfm.features import LEARNED_TYPES, extract_features, matcher_name
+from recon.sfm.learned import FEATURES_DIR, check_installed, extract_learned, match_learned
 from recon.sfm.mapper import map_with_fallback
-from recon.sfm.matching import match_features, num_verified_pairs, resolve_strategy, resolve_vocab_tree
+from recon.sfm.matching import candidate_pairs, match_features, num_verified_pairs, resolve_strategy, resolve_vocab_tree
 from recon.sfm.priors import (
     PAIR_CHECKS,
     PAIR_FILTER_COLUMNS,
@@ -105,12 +106,21 @@ def run_sfm(
     names = inputs.names
     image_root = link_image_root(out / IMAGE_ROOT, inputs.image_dirs)
     gravity = gravity_vectors(inputs.gravity, priors.gravity_min_conf)
+    features = options.features
+    learned = features.type in LEARNED_TYPES
+    if learned:
+        check_installed()
     log.warning("no intrinsics prior: the focal length starts from COLMAP's guess and is refined (calibrate instead)")
 
     with colmap_log(log_file):
         t0 = time.perf_counter()
         camera_model = options.initial_camera_model
-        extract_features(database, image_root, names, options.features, camera_model, use_gpu, gpu_index)
+        if learned:
+            extract_learned(
+                database, image_root, names, features, out / FEATURES_DIR, camera_model, use_gpu, gpu_index
+            )
+        else:
+            extract_features(database, image_root, names, features, camera_model, use_gpu, gpu_index)
         num_gravity_priors = 0
         if priors.use_gravity_prior:
             num_gravity_priors = write_gravity_priors(database, inputs.gravity, priors.gravity_min_conf)
@@ -126,12 +136,26 @@ def run_sfm(
         strategy = resolve_strategy(len(names), options.matching)
         vocab_tree = None
         if strategy in ("time", "sequential") and options.matching.loop_detection:
-            vocab_tree = resolve_vocab_tree(options.matching.vocab_tree_path)
-            if vocab_tree is None:
-                warnings.append("no vocab tree: loop detection is off")
-        strategy = match_features(
-            database, len(names), options.matching, use_gpu, gpu_index, vocab_tree, inputs.images, out / "matching"
-        )
+            if features.type != "sift":  # COLMAP's vocab tree is built on SIFT descriptors
+                warnings.append(f"loop detection is off: the vocab tree does not fit {features.type} features")
+                log.warning(warnings[-1])
+            else:
+                vocab_tree = resolve_vocab_tree(options.matching.vocab_tree_path)
+                if vocab_tree is None:
+                    warnings.append("no vocab tree: loop detection is off")
+        if learned:
+            if strategy == "time" and inputs.images is None:
+                strategy = "sequential"
+            pairs = candidate_pairs(names, strategy, options.matching, inputs.images)
+            match_learned(
+                database, pairs, features, options.matching, out / FEATURES_DIR, out / "matching" / "pairs.txt",
+                use_gpu, gpu_index,
+            )
+        else:
+            strategy = match_features(
+                database, len(names), options.matching, use_gpu, gpu_index, vocab_tree, inputs.images,
+                out / "matching", features.type,
+            )
         num_pairs = num_verified_pairs(database)
         timings["matching"] = time.perf_counter() - t0
         log.info("%s matching: %d verified pairs in %.1f s", strategy, num_pairs, timings["matching"])
@@ -292,6 +316,8 @@ def run_sfm(
         **{k: v for k, v in stats.items() if k != "unregistered_images"},
         "num_models": next(a["num_models"] for a in attempts if a["mapper"] == mapper_used),
         "num_verified_pairs": num_pairs,
+        "feature_type": features.type,
+        "matcher": matcher_name(features),
         "matching_strategy": strategy,
         "loop_detection": {"enabled": vocab_tree is not None, "vocab_tree": vocab_tree},
         "mapper_used": mapper_used,
@@ -322,7 +348,7 @@ def run_sfm(
         "timings": {k: round(v, 3) for k, v in timings.items()},
     }
     write_json(report, out / ARTIFACTS["report"])
-    metrics = ["num_registered", "registered_ratio", "num_points3D", "mean_reproj_px", "median_track_len"]
+    metrics = ["feature_type", "matcher", "num_registered", "registered_ratio", "num_points3D", "mean_reproj_px", "median_track_len"]
     return StageOutput(
         artifacts=dict(ARTIFACTS),
         metrics={k: report[k] for k in metrics},
