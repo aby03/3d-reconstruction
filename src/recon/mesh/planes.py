@@ -111,6 +111,8 @@ def _offset_peaks(offsets: np.ndarray, area: np.ndarray, tau: float, min_area: f
         free[max(0, peak - 4) : peak + 5] = False
         centre = lo + (peak + 0.5) * width
         near = np.abs(offsets - centre) < tau
+        if area[near].sum() <= 0:
+            continue
         offset = float(np.average(offsets[near], weights=area[near]))
         if all(abs(offset - other) >= 2 * tau for other in peaks):
             peaks.append(offset)
