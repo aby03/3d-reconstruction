@@ -2,11 +2,14 @@
 
 Uses the tensor VoxelBlockGrid: this Open3D build's legacy ScalableTSDFVolume extracts an empty mesh."""
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import open3d as o3d
+
+log = logging.getLogger(__name__)
 
 
 BLOCK_RESOLUTION = 16  # voxels per block side
@@ -66,17 +69,29 @@ def fuse(
         o3d.core.Device("CPU:0"),
     )
     multiplier = options.trunc_tau * tau / voxel
-    cloud = []
+    cloud, skipped = [], 0
     for view in views:
         h, w = view.depth.shape
-        depth = o3d.t.geometry.Image(o3d.core.Tensor(np.where(view.depth < max_depth, view.depth, 0.0)[:, :, None].astype(np.float32)))
+        depth_np = np.where(view.depth < max_depth, view.depth, 0.0)
+        if not (depth_np > 0).any():  # Open3D fails on a view with no valid depth
+            skipped += 1
+            continue
+        depth = o3d.t.geometry.Image(o3d.core.Tensor(depth_np[:, :, None].astype(np.float32)))
         color = o3d.t.geometry.Image(o3d.core.Tensor(np.zeros((h, w, 3), np.float32)))
         K, T = o3d.core.Tensor(view.K, o3d.core.float64), o3d.core.Tensor(view.cam_from_world, o3d.core.float64)
         coords = grid.compute_unique_block_coordinates(depth, K, T, 1.0, max_depth, multiplier)
+        if coords.shape[0] == 0:
+            skipped += 1
+            continue
         grid.integrate(coords, depth, color, K, K, T, 1.0, max_depth, multiplier)
         cloud.append(_backproject(view, options.point_stride, max_depth))
-    mesh = grid.extract_triangle_mesh(weight_threshold=options.min_weight)
-    vertices, faces = mesh.vertex.positions.numpy().astype(float), mesh.triangle.indices.numpy().astype(int)
+    if skipped:
+        log.warning("fusion: skipped %d of %d views with no valid depth", skipped, len(views))
+    if cloud:
+        mesh = grid.extract_triangle_mesh(weight_threshold=options.min_weight)
+        vertices, faces = mesh.vertex.positions.numpy().astype(float), mesh.triangle.indices.numpy().astype(int)
+    else:
+        vertices, faces = np.zeros((0, 3)), np.zeros((0, 3), int)
     points = np.concatenate(cloud) if cloud else np.zeros((0, 3))
     if len(points):
         pcd = o3d.geometry.PointCloud()
@@ -84,6 +99,7 @@ def fuse(
         points = np.asarray(pcd.voxel_down_sample(voxel).points)
     report = {
         "views": len(views),
+        "skipped_views": skipped,
         "voxel": voxel,
         "truncation": options.trunc_tau * tau,
         "vertices": len(vertices),
