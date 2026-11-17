@@ -1,22 +1,24 @@
+import shutil
 from pathlib import Path
 
 import pytest
 
+from recon.pipeline.cli import main
 from recon.pipeline.config import load_config, resolve_hardware
 from recon.pipeline.context import RunContext
+from recon.pipeline.run_dir import StageManifest, read_manifest
 from recon.pipeline.runner import open_run, run_stages, select_stages
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-TINY_CAPTURE = REPO_ROOT / "data" / "room2_tiny"
-SCENE = "room2_tiny"
+SMOKE_CAPTURE = REPO_ROOT / "tests" / "resources" / "hotel1_micro"
+SMOKE_CONFIG = Path(__file__).with_name("smoke.yaml")
 
 
 @pytest.fixture(scope="session")
-def tiny_capture() -> Path:
-    """A ~5 s Open Camera Sensors capture. Not committed; create it once with `pixi run make-test-clip`."""
-    if not TINY_CAPTURE.is_dir():
-        pytest.skip(f"{TINY_CAPTURE} missing, create it with `pixi run make-test-clip`")
-    return TINY_CAPTURE
+def smoke_capture() -> Path:
+    """A 2.5 s Open Camera Sensors clip, committed under tests/resources (regenerate with `pixi run make-smoke-clip`)."""
+    assert SMOKE_CAPTURE.is_dir(), f"{SMOKE_CAPTURE} missing"
+    return SMOKE_CAPTURE
 
 
 @pytest.fixture(scope="session")
@@ -25,75 +27,39 @@ def output_root(tmp_path_factory) -> Path:
 
 
 @pytest.fixture(scope="session")
-def pipeline_run(tiny_capture, output_root) -> RunContext:
-    """ingest → keyframes on the tiny clip through the runner, once per session; later steps read its stage dirs.
-    The config is the CLI's: the defaults with the hardware preset picked for this machine."""
-    # the later steps are checked on one camera, with the room-extent crops on (off by default) so that they stay tested
-    overrides = [
-        f"run.output_root={output_root}", "keyframes.stills=false", "dense.filter.roi.enabled=true", "mesh_post.roi.enabled=true",
-    ]
-    hardware = resolve_hardware("auto", overrides=overrides)
-    ctx = open_run(tiny_capture, load_config(overrides=overrides, hardware=hardware or "none"), SCENE, None, hardware)
-    result = run_stages(ctx, select_stages(to="keyframes"))
+def smoke_run(smoke_capture, output_root) -> RunContext:
+    """All 8 stages once, in-process, with tests/smoke.yaml and the hardware preset picked for this machine."""
+    files, overrides = [SMOKE_CONFIG], [f"run.output_root={output_root}"]
+    hardware = resolve_hardware("auto", files, overrides)
+    ctx = open_run(smoke_capture, load_config(files, overrides, hardware=hardware or "none"), None, None, hardware)
+    result = run_stages(ctx, select_stages())
     assert result.status == "success", result.error
     return ctx
 
 
-@pytest.fixture(scope="session")
-def sfm_run(pipeline_run) -> Path:
-    """sfm on the keyframes of `pipeline_run`, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s03_sfm import SfmStage
-
-    result = run_stages(pipeline_run, [SfmStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("sfm")
-
-
-@pytest.fixture(scope="session")
-def align_run(pipeline_run, sfm_run) -> Path:
-    """align on the model of `sfm_run`, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s04_align import AlignStage
-
-    result = run_stages(pipeline_run, [AlignStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("align")
+def assert_stage_ok(stage_dir: Path) -> StageManifest:
+    """The stage succeeded and every artifact its manifest lists exists; returns the manifest."""
+    manifest = read_manifest(stage_dir)
+    assert manifest is not None, f"no manifest in {stage_dir}"
+    assert manifest.status == "success", manifest.error
+    missing = [rel for rel in manifest.artifacts.values() if not (stage_dir / rel).exists()]
+    assert not missing, f"missing artifacts in {stage_dir}: {missing}"
+    return manifest
 
 
-@pytest.fixture(scope="session")
-def dense_run(pipeline_run, align_run) -> Path:
-    """dense on the model of `align_run` with the default config, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s05_dense import DenseStage
-
-    result = run_stages(pipeline_run, [DenseStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("dense")
+def cli(capture: Path, root: Path, *args: str) -> int:
+    """`recon <args>` on the smoke config, e.g. cli(capture, root, "run", "--to", "sfm")."""
+    return main([*args, "--input", str(capture), "--output-root", str(root), "--config", str(SMOKE_CONFIG)])
 
 
-@pytest.fixture(scope="session")
-def mesh_post_run(pipeline_run, dense_run) -> Path:
-    """mesh_post on the mesh of `dense_run` with the default config, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s06_mesh_post import MeshPostStage
+def rerun_copy(ctx: RunContext, output_root: Path, dst: Path, *args: str) -> Path:
+    """Copy sequences/ and the run dir (symlinks kept) under dst and resume the run there with `recon run *args`;
+    asserts exit 0 and returns the copied run dir."""
+    scene = ctx.scene_dir.name
+    shutil.copytree(ctx.scene_dir / "sequences", dst / scene / "sequences", symlinks=True)
+    run_dir = dst / scene / "runs" / ctx.run_dir.name
+    shutil.copytree(ctx.run_dir, run_dir, symlinks=True)
+    capture = next(iter(ctx.inputs.values()))
+    assert cli(capture, dst, "run", "--resume", run_dir.name, *args) == 0
+    return run_dir
 
-    result = run_stages(pipeline_run, [MeshPostStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("mesh_post")
-
-
-@pytest.fixture(scope="session")
-def report_run(pipeline_run, export_run) -> Path:
-    """report of the run of `export_run`, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s08_report import ReportStage
-
-    result = run_stages(pipeline_run, [ReportStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("report")
-
-
-@pytest.fixture(scope="session")
-def export_run(pipeline_run, mesh_post_run) -> Path:
-    """export of the textured mesh of `mesh_post_run`, once per session; returns its stage dir."""
-    from recon.pipeline.stages.s07_export import ExportStage
-
-    result = run_stages(pipeline_run, [ExportStage])
-    assert result.status == "success", result.error
-    return pipeline_run.stage_dir("export")

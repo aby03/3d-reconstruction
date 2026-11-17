@@ -4,6 +4,8 @@ Only the selected frames are re-encoded, so frame i of the clip is exactly the i
 its timestamp file. Sensor CSVs keep their original lines over the frame span +-1 s.
 The clip is checked before it is moved into place: frame count, frame-interval pattern,
 display rotation, and pixel agreement of the first and last frame with the source.
+--long-side N shrinks video and reference JPEGs (JPEG quality 85, video CRF 28). Container and JPEG
+metadata (EXIF, GPS, creation time, device tags) is never copied.
 """
 
 import argparse
@@ -14,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from recon.capture.open_camera_sensors import discover_files, read_frame_timestamps
 
@@ -22,6 +25,9 @@ MIN_REFERENCE_IMAGES = 3
 DROP_FACTOR = 1.5  # frame interval above this multiple of the median counts as a dropped frame
 MAX_PTS_ERROR_S = 1e-3
 MIN_FRAME_PSNR_DB = 35.0
+MIN_RESIZED_PSNR_DB = 28.0
+FULL_CRF, RESIZED_CRF = 16, 28
+JPEG_QUALITY = 85
 
 
 def _run(cmd: list[str]) -> bytes:
@@ -41,10 +47,24 @@ def _packet_pts(video: Path) -> np.ndarray:
     return np.sort(np.array(out.split(), dtype=np.float64))
 
 
-def _gray_frame(video: Path, n: int) -> np.ndarray:
-    """Decode frame n (stored orientation) as 8-bit gray."""
+def _stored_size(video: Path) -> tuple[int, int]:
+    out = _run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height",
+                "-of", "json", str(video)])
+    stream = json.loads(out)["streams"][0]
+    return stream["width"], stream["height"]
+
+
+def _scaled_size(size: tuple[int, int], long_side: int) -> tuple[int, int]:
+    """Size with the long side `long_side`, aspect kept, both dimensions even."""
+    k = long_side / max(size)
+    return tuple(2 * round(d * k / 2) for d in size)
+
+
+def _gray_frame(video: Path, n: int, size: tuple[int, int] | None = None) -> np.ndarray:
+    """Decode frame n (stored orientation) as 8-bit gray, optionally scaled to size (w, h)."""
+    scale = f",scale={size[0]}:{size[1]}:flags=area" if size else ""
     out = _run(["ffmpeg", "-v", "error", "-noautorotate", "-i", str(video), "-map", "0:v:0",
-                "-vf", f"select=eq(n\\,{n})", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
+                "-vf", f"select=eq(n\\,{n}){scale}", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"])
     return np.frombuffer(out, dtype=np.uint8)
 
 
@@ -67,15 +87,18 @@ def _choose_window(t_ns: np.ndarray, refs: list[int], duration_s: float) -> floa
     raise SystemExit(f"no {duration_s} s window with a dropped frame and {MIN_REFERENCE_IMAGES} reference JPEGs")
 
 
-def _encode(src: Path, dst: Path, i0: int, i1: int, rotation: int) -> None:
+def _encode(src: Path, dst: Path, i0: int, i1: int, rotation: int, size: tuple[int, int] | None) -> None:
     raw = dst.with_suffix(".raw.mp4")
+    scale = f",scale={size[0]}:{size[1]}:flags=lanczos" if size else ""
     _run(["ffmpeg", "-v", "error", "-y", "-noautorotate", "-i", str(src), "-map", "0:v:0", "-an",
-          "-vf", f"select=between(n\\,{i0}\\,{i1}),setpts=PTS-STARTPTS", "-fps_mode", "passthrough",
-          "-c:v", "libx264", "-crf", "16", "-preset", "medium", "-pix_fmt", "yuv420p", str(raw)])
+          "-map_metadata", "-1", "-fflags", "+bitexact", "-flags:v", "+bitexact",
+          "-vf", f"select=between(n\\,{i0}\\,{i1}),setpts=PTS-STARTPTS{scale}", "-fps_mode", "passthrough",
+          "-c:v", "libx264", "-crf", str(RESIZED_CRF if size else FULL_CRF), "-preset", "medium",
+          "-x264-params", "no-info=1", "-pix_fmt", "yuv420p", str(raw)])
     # Encoding without autorotation drops the display matrix; restore it with a stream copy.
     # ffmpeg's -display_rotation is counter-clockwise, ffprobe's rotation value is the same angle.
     _run(["ffmpeg", "-v", "error", "-y", "-display_rotation", str(rotation), "-i", str(raw),
-          "-c", "copy", str(dst)])
+          "-map_metadata", "-1", "-fflags", "+bitexact", "-c", "copy", str(dst)])
     raw.unlink()
 
 
@@ -86,7 +109,19 @@ def _write_lines_in_range(src: Path, dst: Path, t_lo: int, t_hi: int) -> int:
     return len(lines)
 
 
-def _verify(src: Path, clip: Path, i0: int, i1: int, rotation: int) -> None:
+def _write_jpeg(src: Path, dst: Path, size: tuple[int, int] | None) -> None:
+    """Re-save a reference JPEG without EXIF/GPS/ICC; `size` is the upright (w, h) or None."""
+    with Image.open(src) as im:
+        if size:
+            im = im.resize(size, Image.LANCZOS)
+        im.convert("RGB").save(dst, quality=JPEG_QUALITY)
+
+
+def _jpeg_size(size: tuple[int, int] | None, rotation: int) -> tuple[int, int] | None:
+    return None if size is None else (size[1], size[0]) if rotation % 180 else size
+
+
+def _verify(src: Path, clip: Path, i0: int, i1: int, rotation: int, resized: bool) -> None:
     n = i1 - i0 + 1
     src_pts, clip_pts = _packet_pts(src)[i0 : i1 + 1], _packet_pts(clip)
     if len(clip_pts) != n:
@@ -96,15 +131,18 @@ def _verify(src: Path, clip: Path, i0: int, i1: int, rotation: int) -> None:
         raise SystemExit(f"frame intervals differ from the source by up to {pts_error * 1e3:.2f} ms")
     if _rotation(clip) != rotation:
         raise SystemExit(f"clip rotation {_rotation(clip)} != source rotation {rotation}")
+    size = _stored_size(clip) if resized else None
+    min_psnr = MIN_RESIZED_PSNR_DB if resized else MIN_FRAME_PSNR_DB
     for k in (0, n - 1):
-        psnr = _psnr(_gray_frame(src, i0 + k), _gray_frame(clip, k))
-        if psnr < MIN_FRAME_PSNR_DB:
+        psnr = _psnr(_gray_frame(src, i0 + k, size), _gray_frame(clip, k))
+        if psnr < min_psnr:
             raise SystemExit(f"clip frame {k} does not match source frame {i0 + k} (PSNR {psnr:.1f} dB)")
         print(f"  frame {k} vs source {i0 + k}: PSNR {psnr:.1f} dB")
     print(f"  frame intervals match within {pts_error * 1e3:.3f} ms, rotation {rotation}")
 
 
-def make_clip(src_root: Path, out: Path, start_s: float | None, duration_s: float) -> None:
+def make_clip(src_root: Path, out: Path, start_s: float | None, duration_s: float,
+              long_side: int | None = None) -> None:
     files = discover_files(src_root)
     t_ns = read_frame_timestamps(files.frame_timestamps)
     if start_s is None:
@@ -122,22 +160,23 @@ def make_clip(src_root: Path, out: Path, start_s: float | None, duration_s: floa
     print(f"{files.root} -> {out}: {start_s:.1f}-{start_s + duration_s:.1f} s, frames {i0}..{i1}")
 
     rotation = _rotation(files.video)
+    size = _scaled_size(_stored_size(files.video), long_side) if long_side else None
     with tempfile.TemporaryDirectory(dir=out.parent, prefix=f".{out.name}.") as tmp:
         stage = Path(tmp) / out.name
         stamp_dir = stage / files.stamp
         stamp_dir.mkdir(parents=True)
 
         clip_video = stage / files.video.name
-        _encode(files.video, clip_video, i0, i1, rotation)
+        _encode(files.video, clip_video, i0, i1, rotation, size)
         (stamp_dir / files.frame_timestamps.name).write_text("\n".join(map(str, t_ns[i0 : i1 + 1])) + "\n")
         for kind, path in files.sensors.items():
             n = _write_lines_in_range(path, stamp_dir / path.name, t_lo - SENSOR_MARGIN_NS, t_hi + SENSOR_MARGIN_NS)
             print(f"  {kind}: {n} samples")
         for path in refs.values():
-            shutil.copy2(path, stamp_dir / path.name)
+            _write_jpeg(path, stamp_dir / path.name, _jpeg_size(size, rotation))
         print(f"  {len(refs)} reference JPEGs")
 
-        _verify(files.video, clip_video, i0, i1, rotation)
+        _verify(files.video, clip_video, i0, i1, rotation, size is not None)
         stage.rename(out)
 
 
@@ -148,6 +187,8 @@ def main() -> None:
     parser.add_argument("--start", type=float, default=None,
                         help="window start in s from the first frame (default: first window with a dropped frame)")
     parser.add_argument("--duration", type=float, default=5.0, help="window length in s")
+    parser.add_argument("--long-side", type=int, default=None,
+                        help="shrink video and reference JPEGs to this long side in px (default: keep size)")
     parser.add_argument("--force", action="store_true", help="replace an existing output directory")
     args = parser.parse_args()
 
@@ -156,7 +197,7 @@ def main() -> None:
             raise SystemExit(f"{args.out} exists, pass --force to replace it")
         shutil.rmtree(args.out)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    make_clip(args.input, args.out, args.start, args.duration)
+    make_clip(args.input, args.out, args.start, args.duration, args.long_side)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ recon = { path = ".", editable = true }
 download-data = "python src/download_data.py"
 dev = "python src/dev.py"
 test = "pytest"
-make-test-clip = "python scripts/make_test_clip.py --input data/room2 --out data/room2_tiny"
+make-smoke-clip = "python scripts/make_test_clip.py --input data/hotel1 --out tests/resources/hotel1_micro --start 24.6 --duration 2.5 --long-side 640 --force"
 recon = "python -m recon.pipeline.cli"
 1a_projection = "python src/tutorials/1_multi_view_geometry/a_projection.py"
 1b_epipolar = "python src/tutorials/1_multi_view_geometry/b_epipolar.py"

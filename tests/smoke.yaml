@@ -1,0 +1,55 @@
+# Smoke config: every stage and every external tool runs once, on as little data as possible.
+loader:
+  verify_reference_jpegs: false
+keyframes:
+  method: uniform                # 2.5 s clip -> 5 keyframes
+  uniform_fps: 2.0
+  analysis_long_side: 240
+  stills: false
+sfm:
+  features:
+    max_num_features: 1024
+    max_image_size: 480
+dense:
+  undistort:
+    max_image_size: 480
+  openmvs:
+    resolution_level: 0
+    min_resolution: 240
+    max_resolution: 480
+    number_views: 2
+    number_views_fuse: 2
+    sub_resolution_levels: 0
+    iters: 1
+    geometric_iters: 0
+  filter:
+    roi: {enabled: true}
+  refine:                        # kept on (+0.4 s) so RefineMesh starts
+    resolution_level: 2
+    scales: 1
+    max_face_area: 64
+  preview:                       # kept on (+0.2 s) so the preview TextureMesh starts
+    min_resolution: 160
+  mono:
+    input_long_side: 196
+  fusion:
+    voxel_tau: 3.0
+    trunc_tau: 12.0
+mesh_post:
+  consistency: {pixel_stride: 8}
+  decimate:
+    texture_face_budget: 20000
+  texture:
+    min_resolution: 240
+    max_texture_size: 1024
+    seam_leveling: false
+  texture_fix:
+    gutter_px: 2
+export:
+  preview_faces: 2000            # 0 would still list the glb preview artifact
+report:
+  figures:
+    width: 160
+    height: 120
+    max_points: 20000
+    waypoints: 3
