@@ -1,4 +1,5 @@
 from conftest import assert_stage_ok, cli
+from recon.io.tables import read_json
 from recon.pipeline.cli import main
 from recon.pipeline.run_dir import MANIFEST_NAME, read_manifest
 from recon.pipeline.stages.s08_report import ARTIFACTS
@@ -12,6 +13,10 @@ def test_smoke(smoke_run):
     # the 3D renders need an OpenGL window; without one they are warnings
     if not [w for w in read_manifest(report).warnings if w.startswith("figure")]:
         assert all((figures / f"{name}.png").is_file() for name in ("overview", "stages", "path", "details"))
+    summary = read_json(report / ARTIFACTS["summary"])
+    mesh_post = next(e for e in summary["stages"] if e["stage"] == "mesh_post")
+    if (smoke_run.stage_dir("dense") / "mono").is_dir():
+        assert 0 <= mesh_post["metrics"]["hole_share_final"] <= 1
 
 
 def test_compare(smoke_run, capsys):

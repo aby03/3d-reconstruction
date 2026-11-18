@@ -369,6 +369,9 @@ report:                          # step 8: 08_report/summary.json + index.html +
     max_points: 1500000          # dense points drawn
     waypoints: 12                # numbered time steps on the camera path figure
     timeout_s: 1200.0            # the rendering process is stopped after this long
+  holes:                         # mesh_post metrics hole_share_raw / _final: share of the surface the keyframes see
+    enabled: true                # (mono depth) that mesh_raw / mesh_final_geometry miss
+    views: 24                    # reference views, evenly spaced
   thresholds:                    # stage -> metric -> bound (minimum for frames_valid_ratio, ref_jpeg_min_psnr_db,
     ingest:                      # registered_ratio; maximum for the other numbers; equal for true/false)
       frames_valid_ratio: 0.99

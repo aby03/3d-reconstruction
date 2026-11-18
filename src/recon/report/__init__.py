@@ -27,7 +27,14 @@ class FigureOptions:
 
 
 @dataclass(slots=True)
+class HoleOptions:
+    enabled: bool = True  # share of the surface the keyframes see (mono depth) that mesh_raw / the final mesh miss
+    views: int = 24  # reference views, evenly spaced
+
+
+@dataclass(slots=True)
 class ReportOptions:
     figures: FigureOptions = field(default_factory=FigureOptions)
+    holes: HoleOptions = field(default_factory=HoleOptions)
     # stage -> metric -> bound: a minimum for LOWER_BOUNDS metrics, a maximum for other numbers, equal for booleans
     thresholds: dict[str, dict[str, float | bool]] = field(default_factory=_default_thresholds)

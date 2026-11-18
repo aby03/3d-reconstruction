@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from recon.io.tables import read_json, write_json
+from recon.mesh.coverage import CoverageOptions, hole_share, reference_views
 from recon.pipeline.config import PipelineConfig, config_dict, load_config
 from recon.pipeline.run_dir import RUN_MANIFEST_NAME, now_iso, read_manifest
 from recon.pipeline.stage import Stage, StageOutput, register_stage, registered_stages
@@ -75,6 +76,24 @@ def _extras(name: str, path: Path, out: Path) -> dict[str, Any]:
     if name == s07_export.STAGE:
         return {"files": read_json(path / s07_export.ARTIFACTS["metadata"])["files"]}
     return {}
+
+
+def hole_metrics(run_dir: Path, views: int) -> dict[str, float]:
+    """Share of the reference pixels (mono depth of `views` evenly spaced keyframes) where the view sees a surface
+    and mesh_raw / mesh_final_geometry have none; {} without mono depth or meshes."""
+    dense = run_dir / s05_dense.DIR_NAME
+    depth_dir = dense / s05_dense.MONO_ARTIFACTS["mono"]
+    meshes = {
+        "hole_share_raw": dense / s05_dense.ARTIFACTS["mesh_raw"],
+        "hole_share_final": run_dir / s06_mesh_post.DIR_NAME / s06_mesh_post.ARTIFACTS["mesh_final_geometry"],
+    }
+    meshes = {k: p for k, p in meshes.items() if p.is_file()}
+    if not meshes or not depth_dir.is_dir():
+        return {}
+    options = CoverageOptions(every=max(1, len(list(depth_dir.rglob("*.npz"))) // views))
+    refs = reference_views(dense / s05_dense.ARTIFACTS["undistorted_model"], depth_dir, options)[:views]
+    shares, _ = hole_share(refs, meshes, options)
+    return {k: round(v, 4) for k, v in shares.items()}
 
 
 def stage_entry(name: str, sequence_id: str | None, path: Path, out: Path) -> dict[str, Any]:
@@ -176,6 +195,12 @@ class ReportStage(Stage):
                 continue
             for sequence_id in ctx.sequence_ids if cls.scope == "sequence" else [None]:
                 entries.append(stage_entry(cls.name, sequence_id, ctx.stage_dir(cls.name, sequence_id), self.out))
+        mesh_post = next((e for e in entries if e["stage"] == s06_mesh_post.STAGE and e["status"] == "success"), None)
+        if self.options.holes.enabled and mesh_post:
+            try:
+                mesh_post["metrics"] |= hole_metrics(ctx.run_dir, self.options.holes.views)
+            except Exception as e:  # noqa: BLE001  (a measurement, never a reason to fail the report)
+                log.warning("hole share: %s", e)
         record = read_json(ctx.run_dir / RUN_MANIFEST_NAME) if (ctx.run_dir / RUN_MANIFEST_NAME).is_file() else {}
         run = {
             "scene": ctx.scene_dir.name,
