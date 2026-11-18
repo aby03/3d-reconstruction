@@ -13,7 +13,7 @@ from PIL import Image
 
 from recon.pipeline.config import load_config
 from recon.sfm import SfmOptions
-from recon.sfm.features import FeatureOptions, extract_features, matcher_name
+from recon.sfm.features import FeatureOptions, colmap_max_features, colmap_types, extract_features
 from recon.sfm.learned import (
     LearnedFeaturesError,
     check_installed,
@@ -28,8 +28,32 @@ from recon.sfm.matching import MatchingOptions, candidate_pairs, time_pairs
 def test_default_is_sift():
     assert SfmOptions().features.type == "sift"
     assert load_config().sfm.features.type == "sift"
-    assert matcher_name(FeatureOptions()) == "sift_bruteforce"
-    assert matcher_name(FeatureOptions(type="disk")) == "disk_lightglue"
+    assert load_config().sfm.features.matcher == "bruteforce"
+
+
+def test_colmap_type_table():
+    E, M = pycolmap.FeatureExtractorType, pycolmap.FeatureMatcherType
+    assert colmap_types(FeatureOptions()) == (E.SIFT, M.SIFT_BRUTEFORCE)
+    assert colmap_types(FeatureOptions(matcher="lightglue")) == (E.SIFT, M.SIFT_LIGHTGLUE)
+    assert colmap_types(FeatureOptions(type="aliked")) == (E.ALIKED_N16ROT, M.ALIKED_BRUTEFORCE)
+    assert colmap_types(FeatureOptions(type="aliked", aliked_model="n32", matcher="lightglue")) == (
+        E.ALIKED_N32,
+        M.ALIKED_LIGHTGLUE,
+    )
+
+
+def test_lightglue_feature_cap():
+    assert colmap_max_features(FeatureOptions()) == 8192
+    assert colmap_max_features(FeatureOptions(matcher="lightglue")) == 4096
+    assert colmap_max_features(FeatureOptions(matcher="lightglue", max_num_features=1024)) == 1024
+
+
+def test_learned_types_need_lightglue():
+    with pytest.raises(ValueError, match="matcher lightglue"):
+        FeatureOptions(type="disk")
+    with pytest.raises(ValueError, match="matcher lightglue"):
+        FeatureOptions(type="superpoint", matcher="bruteforce")
+    FeatureOptions(type="disk", matcher="lightglue")
 
 
 def test_type_validation():
@@ -38,11 +62,11 @@ def test_type_validation():
     with pytest.raises(ValueError, match="aliked_model"):
         FeatureOptions(type="aliked", aliked_model="n8")
     with pytest.raises(ValueError, match="recon.sfm.learned"):
-        extract_features(None, None, [], FeatureOptions(type="disk"))
+        extract_features(None, None, [], FeatureOptions(type="disk", matcher="lightglue"))
 
 
 def test_config_override():
-    config = load_config(overrides=["sfm.features.type=superpoint"])
+    config = load_config(overrides=["sfm.features.type=superpoint", "sfm.features.matcher=lightglue"])
     assert config.sfm.features.type == "superpoint"
 
 
@@ -71,15 +95,15 @@ def test_candidate_pairs():
     names = [f"s/c/{i:02d}.jpg" for i in range(6)]
     options = MatchingOptions(overlap=2, quadratic_overlap=False)
     assert len(candidate_pairs(names, "exhaustive", options)) == 15
-    sequential = candidate_pairs(names[::-1], "sequential", options)
-    assert sequential == time_pairs(names, 2, False)
-    assert (names[0], names[1]) in sequential and (names[0], names[3]) not in sequential
+    named = candidate_pairs(names[::-1], "time", options)
+    assert named == time_pairs(names, 2, False)
+    assert (names[0], names[1]) in named and (names[0], names[3]) not in named
     images = pd.DataFrame({"image_name": names, "sequence_id": "a", "t_ns": [5, 4, 3, 2, 1, 0]})
     timed = candidate_pairs(names, "time", options, images)
     assert (names[5], names[4]) in timed and (names[4], names[5]) not in timed  # earlier capture first
     assert (names[5], names[3]) in timed and (names[5], names[2]) not in timed
     # without a capture time table `time` runs as name-order neighbours
-    assert candidate_pairs(names, "time", options) == sequential
+    assert candidate_pairs(names, "time", options) == named
 
 
 class _FakeExtractor:
@@ -106,7 +130,7 @@ def test_database_writing(tmp_path, monkeypatch):
     monkeypatch.setattr(learned, "check_installed", lambda: None)
     monkeypatch.setattr(learned, "_extractor", lambda options, device: _FakeExtractor())
     database = tmp_path / "db.db"
-    options = FeatureOptions(type="superpoint", max_image_size=40)
+    options = FeatureOptions(type="superpoint", matcher="lightglue", max_image_size=40)
     extract_learned(database, root, names, options, tmp_path / "feats", use_gpu=False)
     db = pycolmap.Database.open(database)
     try:

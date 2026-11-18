@@ -1,7 +1,9 @@
 """IMU priors in the COLMAP database: gravity pose priors, and a gyro check that drops pairs with a wrong rotation."""
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -9,6 +11,8 @@ import pycolmap
 from scipy.spatial.transform import Rotation
 
 from recon.keyframes.priors import cam_rotation_from_device
+
+log = logging.getLogger(__name__)
 
 PAIR_FILTER_COLUMNS = ["image_i", "image_j", "dt_s", "check", "err_deg", "num_inliers", "removed"]
 PAIR_CHECKS = ("gyro", "tilt", "none")
@@ -170,3 +174,23 @@ def filter_pairs(
         finally:
             db.close()
     return errors, suspect_frac if disabled else None
+
+
+
+def imu_pair_filter(
+    database: Path, images: pd.DataFrame, gyro: dict[str, GyroRotations], gravity: dict[str, np.ndarray],
+    options: PairFilterOptions, warnings: list[str],
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """`filter_pairs` on the `pair_rotation_errors`; returns them and the `pair_filter_*` report entries."""
+    errors = pair_rotation_errors(database, images, gyro, gravity, options)
+    if options.enabled and (errors["check"] == "none").all() and len(errors):
+        warnings.append("IMU pair filter skipped: no gyro rotations and no gravity priors")
+        log.warning(warnings[-1])
+    errors, frac = filter_pairs(database, errors, options)
+    if frac is not None:
+        warnings.append(f"pair filter disabled: {frac:.0%} of pairs disagree with the IMU (check R_cam_imu / time offset)")
+        log.warning(warnings[-1])
+    log.info("IMU pair filter: %d of %d pairs removed", errors["removed"].sum(), len(errors))
+    checked = {check: int((errors["check"] == check).sum()) for check in PAIR_CHECKS}
+    report = {"pair_filter_removed": int(errors["removed"].sum()), "pair_filter_checked": checked}
+    return errors, report | {"pair_filter_disabled": frac is not None}

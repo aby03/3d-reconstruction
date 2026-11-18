@@ -1,6 +1,6 @@
 """Mono depth points where the dense cloud of a run has none, written next to a copy of the cloud:
 
-    pixi run python scripts/fill_dense.py --run outputs/room2_tiny/runs/<run_id> --out <dir>
+    pixi run python scripts/fill_dense.py --run outputs/<scene>/runs/<run_id> --out <dir>
 
 Writes `fill_points.ply` (the added points), `dense_points_filled.ply` (dense cloud and added points) and
 `dense_points_filled_debug.ply` (added points in magenta) into `--out` and prints how much of the SfM points the

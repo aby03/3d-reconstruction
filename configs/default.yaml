@@ -54,22 +54,23 @@ keyframes:
 sfm:
   initial_camera_model: SIMPLE_RADIAL  # COLMAP model the mapper estimates; one camera per sequence image folder
   features:
-    type: sift                   # sift | aliked (COLMAP's ALIKED + LightGlue, models downloaded once) | disk | superpoint (LightGlue, needs `pixi run -e lightglue recon ...`); no loop detection except for sift
+    type: sift                   # sift | aliked (COLMAP, models downloaded once) | disk | superpoint (need matcher lightglue and `pixi run -e lightglue recon ...`); loop detection only for sift
     aliked_model: n16rot         # aliked: n16rot (rotation robust) | n32
+    matcher: bruteforce          # bruteforce | lightglue (COLMAP's, for sift / aliked: max_num_features is capped at 4096)
     max_num_features: 8192
     max_image_size: 1920         # long side the images are scaled to for extraction
     domain_size_pooling: false   # true is better on low texture but forces COLMAP's CPU SIFT
   matching:
-    strategy: auto               # auto (exhaustive up to exhaustive_max_images, else time) | time (neighbours by capture time across all cameras) | sequential (name order) | exhaustive
+    strategy: auto               # auto (exhaustive up to exhaustive_max_images, else time) | time (neighbours by capture time across all cameras) | exhaustive
     exhaustive_max_images: 200
-    overlap: 20                  # time / sequential: each image is matched with the next `overlap` ones (by capture time / name)
-    quadratic_overlap: true      # sequential: and with the ones 2^k further on
+    overlap: 20                  # time: each image is matched with the next `overlap` ones (by capture time)
+    quadratic_overlap: true      # time: and with the ones 2^k further on
     min_num_inliers: 15          # a pair is verified with at least this many inlier matches
     max_num_matches: 32768
-    loop_detection: true         # sequential: match every loop_detection_period-th keyframe with its
+    loop_detection: true         # time (sift only): match every loop_detection_period-th keyframe with its
     loop_detection_period: 10    #   loop_detection_num_images most similar ones (vocab tree), to close revisits
     loop_detection_num_images: 50
-    vocab_tree_path: null        # null: COLMAP's SIFT tree, downloaded once into ~/.cache/colmap/ (off if that fails)
+    vocab_tree_path: null        # null: COLMAP's SIFT tree, downloaded by COLMAP once (loop detection is off if that fails)
   priors:
     use_gravity_prior: true      # keyframe gravity (priors/gravity_cam.csv) constrains rotation averaging
     gravity_min_conf: 0.3        # priors below this confidence are left out

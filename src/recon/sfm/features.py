@@ -1,5 +1,6 @@
 """Feature extraction into a COLMAP database: one camera per image folder (`<sequence_id>/<camera_id>/`)."""
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,16 +8,35 @@ from typing import Literal
 
 import pycolmap
 
+log = logging.getLogger(__name__)
 
 FEATURE_TYPES = ("sift", "aliked", "disk", "superpoint")
 LEARNED_TYPES = ("disk", "superpoint")  # extracted and matched with torch + LightGlue (`recon.sfm.learned`)
+COLMAP_LIGHTGLUE_MAX_FEATURES = 4096  # 8192 features abort COLMAP's LightGlue on a 6 GB GPU
+
+_MATCHER_TYPES = {
+    "sift": {
+        "bruteforce": pycolmap.FeatureMatcherType.SIFT_BRUTEFORCE,
+        "lightglue": pycolmap.FeatureMatcherType.SIFT_LIGHTGLUE,
+    },
+    "aliked": {
+        "bruteforce": pycolmap.FeatureMatcherType.ALIKED_BRUTEFORCE,
+        "lightglue": pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE,
+    },
+}
+_EXTRACTOR_TYPES = {
+    ("sift", None): pycolmap.FeatureExtractorType.SIFT,
+    ("aliked", "n16rot"): pycolmap.FeatureExtractorType.ALIKED_N16ROT,
+    ("aliked", "n32"): pycolmap.FeatureExtractorType.ALIKED_N32,
+}
 
 
 @dataclass(slots=True)
 class FeatureOptions:
     type: Literal["sift", "aliked", "disk", "superpoint"] = "sift"
     aliked_model: Literal["n16rot", "n32"] = "n16rot"  # aliked: COLMAP's ONNX network (n16rot is rotation robust)
-    max_num_features: int = 8192
+    matcher: Literal["bruteforce", "lightglue"] = "bruteforce"  # disk / superpoint need lightglue
+    max_num_features: int = 8192  # capped for COLMAP's LightGlue
     max_image_size: int = 1920  # long side the images are scaled down to for extraction
     domain_size_pooling: bool = False  # true forces COLMAP's CPU SIFT
 
@@ -25,11 +45,28 @@ class FeatureOptions:
             raise ValueError(f"sfm.features.type must be one of {', '.join(FEATURE_TYPES)}, not {self.type!r}")
         if self.aliked_model not in ("n16rot", "n32"):
             raise ValueError(f"sfm.features.aliked_model must be n16rot or n32, not {self.aliked_model!r}")
+        if self.matcher not in ("bruteforce", "lightglue"):
+            raise ValueError(f"sfm.features.matcher must be bruteforce or lightglue, not {self.matcher!r}")
+        if self.type in LEARNED_TYPES and self.matcher != "lightglue":
+            raise ValueError(f"sfm.features.type {self.type} needs sfm.features.matcher lightglue, not {self.matcher!r}")
 
 
-def matcher_name(options: FeatureOptions) -> str:
-    """The matcher that goes with the feature type, as reported."""
-    return "sift_bruteforce" if options.type == "sift" else f"{options.type}_lightglue"
+def colmap_types(options: FeatureOptions) -> tuple[pycolmap.FeatureExtractorType, pycolmap.FeatureMatcherType]:
+    """COLMAP's extractor and matcher enums of a `sift` / `aliked` option set."""
+    model = options.aliked_model if options.type == "aliked" else None
+    return _EXTRACTOR_TYPES[options.type, model], _MATCHER_TYPES[options.type][options.matcher]
+
+
+def colmap_max_features(options: FeatureOptions) -> int:
+    """`max_num_features`, capped for COLMAP's LightGlue."""
+    if options.matcher == "lightglue" and options.max_num_features > COLMAP_LIGHTGLUE_MAX_FEATURES:
+        log.warning(
+            "max_num_features %d capped to %d for COLMAP's LightGlue",
+            options.max_num_features,
+            COLMAP_LIGHTGLUE_MAX_FEATURES,
+        )
+        return COLMAP_LIGHTGLUE_MAX_FEATURES
+    return options.max_num_features
 
 
 def device(use_gpu: bool) -> pycolmap.Device:
@@ -55,12 +92,12 @@ def extract_features(
     extraction.max_image_size = options.max_image_size
     extraction.use_gpu = use_gpu
     extraction.gpu_index = str(gpu_index)
+    extraction.type = colmap_types(options)[0]
+    max_features = colmap_max_features(options)
     if options.type == "aliked":
-        extraction.type = getattr(pycolmap.FeatureExtractorType, f"ALIKED_{options.aliked_model.upper()}")
-        extraction.aliked.max_num_features = options.max_num_features
+        extraction.aliked.max_num_features = max_features
     else:
-        extraction.type = pycolmap.FeatureExtractorType.SIFT
-        extraction.sift.max_num_features = options.max_num_features
+        extraction.sift.max_num_features = max_features
         extraction.sift.domain_size_pooling = options.domain_size_pooling
     pycolmap.extract_features(
         database,

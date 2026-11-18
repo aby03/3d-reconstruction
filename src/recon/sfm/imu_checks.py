@@ -3,7 +3,9 @@ the whole capture: the accelerometer is integrated inside short windows of conse
 own start velocity, bias and model scale, so errors never accumulate), the magnetometer is compared with the camera
 orientations through one fitted offset and one constant field vector. Thresholds are robust statistics of the capture."""
 
+import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,6 +14,9 @@ import pycolmap
 from scipy.spatial.transform import Rotation, Slerp
 
 from recon.io.colmap import parse_image_name
+from recon.sfm.priors import GyroRotations
+
+log = logging.getLogger(__name__)
 
 MAD_TO_STD = 1.4826
 GRAVITY = 9.80665  # m/s^2, the accelerometer's unit
@@ -231,3 +236,33 @@ def analyze_heading(
         outliers=[{"image": n, "residual": float(r)} for n, r, flag in zip(names, res, bad) if flag],
     )
     return report
+
+
+
+def check(
+    rec: pycolmap.Reconstruction, images: pd.DataFrame, sensor_dirs: dict[str, Path], gyro: dict[str, GyroRotations],
+    gravity: dict[str, np.ndarray], continuity: dict[str, Any], options: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`analyze_motion` and `analyze_heading` when enabled; motion flags are added to `continuity`."""
+    motion: dict[str, Any] = {"enabled": False}
+    heading: dict[str, Any] = {"enabled": False}
+    if not (options.motion.enabled or options.heading.enabled):
+        return motion, heading
+    accel, mag = ({k: pd.read_csv(d / f"{kind}.csv") for k, d in sensor_dirs.items() if (d / f"{kind}.csv").exists()}
+                  for kind in ("accel", "magnetic"))
+    R_cam_imu = {k: v.R_cam_imu for k, v in gyro.items()}
+    if options.motion.enabled:
+        motion = analyze_motion(rec, images, accel, R_cam_imu, down_in_model(rec, gravity), options.motion)
+        for name, signals in motion["flagged"].items():  # a second opinion on the path, the same as a continuity signal
+            continuity["flagged"].setdefault(name, [])
+            continuity["flagged"][name] += [x for x in signals if x not in continuity["flagged"][name]]
+        continuity["num_flagged"] = len(continuity["flagged"])
+        continuity["num_flagged_strong"] = sum(len(v) >= 2 for v in continuity["flagged"].values())
+        if motion.get("scale"):
+            log.info("accelerometer windows: %d, scale spread %.2f (log), %d image(s) flagged", motion["windows"],
+                     motion["scale"]["log_spread"], len(motion["flagged"]))
+    if options.heading.enabled:
+        heading = analyze_heading(rec, images, mag, R_cam_imu, options.heading)
+        if heading.get("checked"):
+            log.info("magnetometer: %d keyframes, %d outlier(s)", heading["checked"], len(heading["outliers"]))
+    return motion, heading

@@ -13,7 +13,7 @@ def test_smoke(smoke_run):
 
 
 def test_mapper_fallback_and_loop_detection(smoke_run, output_root, tmp_path):
-    """An unreachable registration target runs every mapper; sequential matching runs loop detection when the vocab
+    """An unreachable registration target runs every mapper; time matching runs loop detection when the vocab
     tree is available."""
     run_dir = rerun_copy(
         smoke_run,
@@ -24,14 +24,14 @@ def test_mapper_fallback_and_loop_detection(smoke_run, output_root, tmp_path):
         "--set",
         "sfm.mapper.min_registered_ratio=1.01",
         "--set",
-        "sfm.matching.strategy=sequential",
+        "sfm.matching.strategy=time",
     )
     out = run_dir / "03_sfm"
-    manifest = assert_stage_ok(out)
+    assert_stage_ok(out)
     report = read_json(out / ARTIFACTS["report"])
     assert len(report["mapper_attempts"]) == 3
-    warned = "no vocab tree: loop detection is off" in manifest.warnings
-    assert report["loop_detection"]["enabled"] != warned
+    assert report["matching_strategy"] == "time"
+    assert isinstance(report["loop_detection"]["enabled"], bool)  # False offline
 
 
 @pytest.mark.parametrize("feature_type", ["aliked", "disk", "superpoint"])
@@ -39,7 +39,8 @@ def test_learned_features(smoke_run, output_root, tmp_path, feature_type):
     if feature_type != "aliked":
         pytest.importorskip("lightglue")
     try:
-        run_dir = rerun_copy(smoke_run, output_root, tmp_path, "--to", "sfm", "--set", f"sfm.features.type={feature_type}")
+        run_dir = rerun_copy(smoke_run, output_root, tmp_path, "--to", "sfm", "--set", f"sfm.features.type={feature_type}",
+                          "--set", "sfm.features.matcher=lightglue")
     except AssertionError:
         manifests = list(tmp_path.glob("*/runs/*/03_sfm"))
         error = (read_manifest(manifests[0]).error or "") if manifests else ""

@@ -1,9 +1,6 @@
 """Feature matching and two-view geometric verification of the images in a COLMAP database."""
 
-import hashlib
 import logging
-import os
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -11,7 +8,7 @@ from typing import Literal
 import pandas as pd
 import pycolmap
 
-from recon.sfm.features import device
+from recon.sfm.features import FeatureOptions, colmap_types, device
 
 log = logging.getLogger(__name__)
 
@@ -25,59 +22,22 @@ SIFT_VOCAB_TREE = (
 
 @dataclass(slots=True)
 class MatchingOptions:
-    strategy: Literal["auto", "time", "sequential", "exhaustive"] = "auto"
+    strategy: Literal["auto", "time", "exhaustive"] = "auto"
     exhaustive_max_images: int = 200  # auto: exhaustive up to this many images, else time
-    overlap: int = 20  # time / sequential: neighbours matched (by capture time / in name order)
-    quadratic_overlap: bool = True  # time / sequential: also neighbours 2^k apart
+    overlap: int = 20  # time: neighbours matched by capture time
+    quadratic_overlap: bool = True  # time: also neighbours 2^k apart
     min_num_inliers: int = 15
     max_num_matches: int = 32768
-    loop_detection: bool = True  # time / sequential: also match each loop_detection_period-th image with similar ones (time: and every image of the non-path cameras)
+    loop_detection: bool = True  # time (sift only): also match each loop_detection_period-th image with similar ones (time: and every image of the non-path cameras)
     loop_detection_period: int = 10
     loop_detection_num_images: int = 50
-    vocab_tree_path: str | None = None  # None: COLMAP's SIFT tree, downloaded once into ~/.cache/colmap/
+    vocab_tree_path: str | None = None  # None: COLMAP's SIFT tree, downloaded by COLMAP once; a path or `url;name;sha256` string
 
 
 def resolve_strategy(num_images: int, options: MatchingOptions) -> str:
     if options.strategy != "auto":
         return options.strategy
     return "exhaustive" if num_images <= options.exhaustive_max_images else "time"
-
-
-def _cache_dir() -> Path:
-    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "colmap"
-
-
-def _download(url: str, path: Path, sha256: str) -> None:
-    tmp = path.with_name(f"{path.name}.tmp")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        urllib.request.urlretrieve(url, tmp)
-        digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
-        if digest != sha256:
-            raise OSError(f"sha256 {digest} != {sha256}")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def resolve_vocab_tree(path: str | None = None, spec: str = SIFT_VOCAB_TREE) -> Path | None:
-    """The vocabulary tree file: `path` if given, else `spec` (`url;name;sha256`) from COLMAP's cache, downloaded
-    there once if missing. None (with a warning) when it can't be found or downloaded."""
-    if path is not None:
-        if Path(path).is_file():
-            return Path(path)
-        log.warning("vocab tree %s not found: loop detection is off", path)
-        return None
-    url, name, sha256 = spec.split(";")
-    cached = _cache_dir() / f"{sha256}-{name}"  # the name COLMAP gives its own downloads
-    if not cached.is_file():
-        log.info("downloading the vocab tree %s to %s", url, cached)
-        try:
-            _download(url, cached, sha256)
-        except OSError as e:
-            log.warning("vocab tree download failed (%s): loop detection is off", e)
-            return None
-    return cached
 
 
 def time_order(images: pd.DataFrame) -> list[str]:
@@ -96,22 +56,16 @@ def time_pairs(names: list[str], overlap: int, quadratic: bool) -> list[tuple[st
     return sorted({(names[i], names[i + o]) for i in range(len(names)) for o in offsets if i + o < len(names)})
 
 
-def sequential_pairs(names: list[str], overlap: int, quadratic: bool) -> list[tuple[str, str]]:
-    """Pairs of images that are neighbours in name order (COLMAP's sequential matching without loop detection)."""
-    return time_pairs(sorted(names), overlap, quadratic)
-
-
 def candidate_pairs(
     names: list[str], strategy: str, options: MatchingOptions, images: pd.DataFrame | None = None
 ) -> list[tuple[str, str]]:
-    """The image pairs `strategy` (as from `resolve_strategy`) matches: all pairs, time neighbours (`images` needs
-    `image_name, sequence_id, t_ns`; without it name-order neighbours) or name-order neighbours."""
+    """The image pairs the learned matcher matches: all pairs for `exhaustive`, else (`images` needs
+    `image_name, sequence_id, t_ns`; without it name order) time neighbours."""
     if strategy == "exhaustive":
         ordered = sorted(names)
         return [(a, b) for i, a in enumerate(ordered) for b in ordered[i + 1 :]]
-    if strategy == "time" and images is not None:
-        return time_pairs(time_order(images), options.overlap, options.quadratic_overlap)
-    return sequential_pairs(names, options.overlap, options.quadratic_overlap)
+    order = time_order(images) if images is not None else sorted(names)
+    return time_pairs(order, options.overlap, options.quadratic_overlap)
 
 
 def _query_images(images: pd.DataFrame, period: int) -> list[str]:
@@ -131,38 +85,36 @@ def match_features(
     database: Path,
     num_images: int,
     options: MatchingOptions,
+    features: FeatureOptions,
     use_gpu: bool = True,
     gpu_index: int = 0,
-    vocab_tree: Path | None = None,
     images: pd.DataFrame | None = None,
     work_dir: Path | None = None,
-    feature_type: str = "sift",
-) -> str:
-    """Match and verify image pairs in `database`; returns the strategy used. Relative poses are always computed.
+) -> tuple[str, bool]:
+    """Match and verify image pairs in `database` with COLMAP's matcher for `features`; returns the strategy used
+    and whether loop detection ran. Relative poses are always computed.
 
     `time` needs `images` (`image_name, sequence_id, t_ns`) and a `work_dir` for its pair lists; without them it
-    runs as `sequential`. With `vocab_tree`, `time` and `sequential` also detect loops (`options.loop_detection*`).
-    `feature_type` `aliked` matches with COLMAP's ALIKED LightGlue (no loop detection: the vocab tree is SIFT-only).
+    runs as `exhaustive`. For `sift` features `time` also detects loops (`options.loop_detection*`) with COLMAP's
+    vocab tree, which is built on SIFT descriptors; offline (no vocab tree) it runs without.
     """
-    if feature_type == "aliked":
-        vocab_tree = None
     strategy = resolve_strategy(num_images, options)
     if strategy == "time" and (images is None or work_dir is None):
-        strategy = "sequential"
+        strategy = "exhaustive"
     matching = pycolmap.FeatureMatchingOptions()
+    matching.type = colmap_types(features)[1]
     matching.use_gpu = use_gpu
     matching.gpu_index = str(gpu_index)
     matching.max_num_matches = options.max_num_matches
-    if feature_type == "aliked":
-        matching.type = pycolmap.FeatureMatcherType.ALIKED_LIGHTGLUE
     verification = pycolmap.TwoViewGeometryOptions()
     verification.min_num_inliers = options.min_num_inliers
     verification.compute_relative_pose = True
+    loops = False
     if strategy == "exhaustive":
         pycolmap.match_exhaustive(
             database, matching_options=matching, verification_options=verification, device=device(use_gpu)
         )
-    elif strategy == "time":
+    else:
         work_dir.mkdir(parents=True, exist_ok=True)
         pairs = time_pairs(time_order(images), options.overlap, options.quadratic_overlap)
         pair_file = work_dir / "time_pairs.txt"
@@ -173,34 +125,22 @@ def match_features(
             database, matching_options=matching, pairing_options=imported, verification_options=verification,
             device=device(use_gpu),
         )
-        if vocab_tree is not None:
+        if options.loop_detection and features.type == "sift":
             query_file = work_dir / "loop_queries.txt"
             query_file.write_text("".join(f"{n}\n" for n in _query_images(images, options.loop_detection_period)))
             tree = pycolmap.VocabTreePairingOptions()
-            tree.vocab_tree_path = str(vocab_tree)
+            tree.vocab_tree_path = options.vocab_tree_path or SIFT_VOCAB_TREE
             tree.match_list_path = str(query_file)
             tree.num_images = options.loop_detection_num_images
-            pycolmap.match_vocabtree(
-                database, matching_options=matching, pairing_options=tree, verification_options=verification,
-                device=device(use_gpu),
-            )
-    else:
-        pairing = pycolmap.SequentialPairingOptions()
-        pairing.overlap = options.overlap
-        pairing.quadratic_overlap = options.quadratic_overlap
-        if vocab_tree is not None:
-            pairing.loop_detection = True
-            pairing.loop_detection_period = options.loop_detection_period
-            pairing.loop_detection_num_images = options.loop_detection_num_images
-            pairing.vocab_tree_path = vocab_tree
-        pycolmap.match_sequential(
-            database,
-            matching_options=matching,
-            pairing_options=pairing,
-            verification_options=verification,
-            device=device(use_gpu),
-        )
-    return strategy
+            try:
+                pycolmap.match_vocabtree(
+                    database, matching_options=matching, pairing_options=tree, verification_options=verification,
+                    device=device(use_gpu),
+                )
+                loops = True
+            except Exception as e:  # offline: COLMAP can't fetch the vocab tree
+                log.warning("loop detection is off, vocab tree unavailable: %s", e)
+    return strategy, loops
 
 
 def num_verified_pairs(database: Path) -> int:
