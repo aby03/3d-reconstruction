@@ -265,7 +265,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     render_long_side: 640        # depth renders for the TSDF mesh
     depth: median                # median | expected depth for the TSDF
     min_alpha: 0.5               # pixels with less accumulated opacity are not fused
-    novel_views: 120             # frames of the novel-view path (0: none)
+    novel_views: 120             # frames of the novel-view path: gs/novel/*.jpg, gs/novel.mp4 (0: none)
     seed: null                   # null: run.seed
 
 mesh_post:                       # step 6: clean, fill small holes, flatten planes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
@@ -358,7 +358,7 @@ export:                          # step 7: model.glb (Y up, textures embedded) +
     double_sided: true           # room interiors are seen from inside
 
 report:                          # step 8: 08_report/summary.json + index.html + figures/; a failed threshold is a warning
-  figures:                       # figures/{overview,stages,path,details}.png (and panels/): renders of the outputs, the camera path with numbered waypoints
+  figures:                       # figures/{overview,stages,path,details,gaussians}.png (gaussians: dense backend 2dgs; and panels/): renders of the outputs, the camera path with numbered waypoints
     enabled: true
     width: 1400                  # size of a rendered view in pixels
     height: 800

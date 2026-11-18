@@ -61,6 +61,14 @@ def _stage_section(entry: Mapping[str, Any], checks: Sequence[Mapping[str, Any]]
         parts.append(_table(rows, ("metric", "value", "threshold"), raw=True))
     if warnings := entry.get("warnings"):
         parts.append("<ul>" + "".join(f'<li class="warn">{escape(w)}</li>' for w in warnings) + "</ul>")
+    gs_images = []
+    if gs := entry.get("gs"):
+        gs_images = gs["images"]
+        rows = [(k.replace("_", " "), v) for k, v in gs.items() if k not in ("images", "video")]
+        parts.append("<h3>2DGS</h3>" + _table(rows))
+        parts += [f'<a href="{escape(i)}"><img src="{escape(i)}" alt="{escape(i)}"></a>' for i in gs_images]
+        if gs.get("video"):
+            parts.append(f'<p><video src="{escape(gs["video"])}" controls loop width="640"></video></p>')
     if planes := entry.get("planes"):
         rows = [
             (p["id"], p["label"], p["normal"], p["d"], f"{100 * p['area_frac']:.1f}%", p["faces"], p["rms_before"],
@@ -77,7 +85,7 @@ def _stage_section(entry: Mapping[str, Any], checks: Sequence[Mapping[str, Any]]
     if files := entry.get("files"):
         rows = [(name, f.get("up"), f.get("faces"), f"{f['bytes'] / 2**20:.2f} MB") for name, f in files.items()]
         parts.append("<h3>files</h3>" + _table(rows, ("file", "up", "faces", "size")))
-    for image in map(escape, entry.get("images", [])):
+    for image in map(escape, (i for i in entry.get("images", []) if i not in gs_images)):
         parts.append(f'<a href="{image}"><img src="{image}" alt="{image}"></a>')
     return "\n".join(parts)
 

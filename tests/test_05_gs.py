@@ -1,5 +1,6 @@
 import time
 
+import av
 import numpy as np
 import pandas as pd
 import pycolmap
@@ -107,6 +108,9 @@ def test_gs_backend(smoke_run, output_root, tmp_path):
     stopped = read_json(dense / "reports" / "dense_report.json")
     assert not stopped["gs"]["finished"] and stopped["gs"]["step"] == 0 and stopped["gs"]["resumed_from"] is None
     assert any("rerun dense with --force dense" in w for w in stopped["warnings"])
+    assert not stopped["gs"]["prep_reused"]
+    sparse = dense / "undistorted" / "sparse" / "cameras.bin"
+    undistorted_at = sparse.stat().st_mtime_ns
     t_stopped = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -119,6 +123,16 @@ def test_gs_backend(smoke_run, output_root, tmp_path):
     assert report["dense_backend"] == "2dgs" and not report["gs"]["reused"] and report["gs"]["num_gaussians"] > 0
     assert report["gs"]["finished"] and report["gs"]["step"] == report["gs"]["iterations"]
     assert report["gs"]["resumed_from"] == 0
+    # the second chunk keeps the undistortion, import and mono depth of the first
+    assert report["gs"]["prep_reused"] and sparse.stat().st_mtime_ns == undistorted_at
+    assert (dense / "mono_points.ply").is_file() and any((dense / "mono").rglob("*.npz"))
+    gs_novel = smoke_run.config.dense.gs.novel_views
+    for name in ("gs_training", "gs_holdout", "gs_depth_vs_mono"):
+        assert (dense / "reports" / f"{name}.png").stat().st_size > 0, name
+    assert (dense / "gs" / "novel_strip.png").is_file() and len(list((dense / "gs" / "novel").glob("*.jpg"))) == gs_novel
+    assert _frames(dense / "gs" / "novel.mp4") == gs_novel == report["gs"]["novel_views"]
+    assert (run / "08_report" / "figures" / "gaussians.png").is_file()
+    assert '<video src="../05_dense/gs/novel.mp4"' in (run / "08_report" / "index.html").read_text()
     assert report["mesh_raw"]["faces"] > 0 and report["timings"]["train"] > 0
     # nothing of the OpenMVS run is left for mesh_post to read
     assert not any((dense / rel).exists() for rel in ("mesh_tsdf.ply", "chain.json", "openmvs/scene_dense.ply"))
@@ -133,6 +147,12 @@ def test_gs_backend(smoke_run, output_root, tmp_path):
                "--set", "dense.backend=2dgs", "--set", "dense.gs.novel_views=2", "--set", "report.figures.width=200") == 0
     again = read_json(dense / "reports" / "dense_report.json")
     assert again["gs"]["reused"] and again["gs"]["train_s"] == report["gs"]["train_s"]
-    assert again["mesh_raw"]["faces"] == report["mesh_raw"]["faces"]
+    assert again["mesh_raw"]["faces"] == report["mesh_raw"]["faces"] and again["gs"]["prep_reused"]
+    assert _frames(dense / "gs" / "novel.mp4") == 2 == len(list((dense / "gs" / "novel").glob("*.jpg")))
     print(f"2dgs dense stopped at once: {t_stopped:.1f} s, continued from dense on: {t_first:.1f} s,"
           f" again (training reused): {time.perf_counter() - t0:.1f} s")
+
+
+def _frames(video) -> int:
+    with av.open(str(video)) as container:
+        return sum(1 for _ in container.decode(video=0))

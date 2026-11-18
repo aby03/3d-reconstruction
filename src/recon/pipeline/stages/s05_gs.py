@@ -1,8 +1,9 @@
 """Step 5 with `dense.backend: 2dgs`: undistort and import the aligned model (TextureMesh in mesh_post needs the
 scene), fit the mono depth, train 2D Gaussian splats (kept in `gs/` for a re-run with the same training inputs),
-TSDF-fuse their rendered depth into the mesh and write the Gaussian centres as the dense points. Writes the
-OpenMVS backend's artifacts except its own clouds and meshes, and no `mesh_tsdf.ply` (mesh_post then skips the
-merge and the gap fill)."""
+TSDF-fuse their rendered depth into the mesh and write the Gaussian centres as the dense points; then the 2DGS
+figures and a novel-view video. Writes the OpenMVS backend's artifacts except its own clouds and meshes, and no
+`mesh_tsdf.ply` (mesh_post then skips the merge and the gap fill). The undistortion, import and mono depth are kept
+for the next run too (`gs_prep.json`), so a training continued in chunks does not redo them."""
 
 import dataclasses
 import hashlib
@@ -14,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import open3d as o3d
 import pandas as pd
@@ -27,6 +29,7 @@ from recon.io.colmap import camera_intrinsics, camera_keys, colmap_log
 from recon.io.ply import read_mesh, write_points
 from recon.io.tables import read_json, write_csv, write_json
 from recon.io.tools import ToolRunner
+from recon.io.video import write_mp4
 from recon.mesh.qa import tau as geometry_tau
 from recon.pipeline.config import ConfigError
 from recon.pipeline.device import Backend
@@ -45,6 +48,8 @@ NOT_TRAINING = ("render_long_side", "depth", "min_alpha", "novel_views", "max_mi
 # are floaters and the half-transparent fill, far from any surface: mesh_post's QA reads these points)
 MIN_POINT_OPACITY, MAX_POINT_DIST_TAU = 0.5, 2.0
 MONO_POINT_KEYS = ("min_inlier_ratio", "max_residual", "max_depth_frac", "point_stride", "voxel_tau")  # fusion keys
+FIGURE_VIEWS = (4, 6)  # gs_holdout / gs_depth_vs_mono: up to 6 held-out views, or 4 training views without any
+STRIP_FRAMES, VIDEO_FPS = 6, 24
 
 
 def train_key(options: DenseOptions, align_dir: Path, seed: int) -> str:
@@ -61,6 +66,27 @@ def train_key(options: DenseOptions, align_dir: Path, seed: int) -> str:
         "gsplat": importlib.metadata.version("gsplat"),
     }
     return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def prep_key(options: DenseOptions, align_dir: Path) -> str:
+    """sha1 of what the undistortion, the import, the mono depth and the mono points depend on."""
+    data = {
+        "version": CACHE_VERSION,
+        "align": manifest_hash(align_dir),
+        "undistort": dataclasses.asdict(options.undistort),
+        "mono": dataclasses.asdict(options.mono),
+        "fusion": {k: getattr(options.fusion, k) for k in MONO_POINT_KEYS},
+    }
+    return hashlib.sha1(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _prep_files(options: DenseOptions) -> list[str]:
+    """What a kept undistortion, import and mono depth must have."""
+    files = [d.ARTIFACTS["undistorted_model"], d.ARTIFACTS["undistorted_images"], d.ARTIFACTS["scene"],
+             d.ARTIFACTS["scene_dense"]]
+    if options.mono.enabled:
+        files += [d.MONO_ARTIFACTS["mono"], d.MONO_ARTIFACTS["mono_fit"], d.FUSION_ARTIFACTS["mono_points"]]
+    return files
 
 
 def _mono_points(views: list[FusionView], diag: float, t: float, options: Any) -> np.ndarray:
@@ -114,33 +140,54 @@ def run_gs(
     if options.depth_source != "mono":
         warnings.append(f"depth_source {options.depth_source} is not used by backend 2dgs; using the mono depth")
 
-    t0 = time.perf_counter()
     undistorted_dir, work_dir = out / d.ARTIFACTS["undistorted"], out / d.WORK_DIR
-    with colmap_log(runner.log_dir / "colmap.log"):
-        urec = undistort(align_dir / s04_align.ARTIFACTS["model"], sfm_dir / s03_sfm.IMAGE_ROOT, names, undistorted_dir,
-                         options.undistort)
+    pkey = prep_key(options, align_dir)
+    prep = read_json(out / d.GS_PREP) if (out / d.GS_PREP).is_file() else {}
+    prep_reused = prep.get("key") == pkey and all((out / rel).exists() for rel in _prep_files(options))
+    if prep_reused:
+        log.info("reusing the undistortion, import and mono depth of %s (same inputs and options)", out)
+    else:
+        for rel in d.GS_PREP_KEEP:
+            path = out / rel
+            shutil.rmtree(path) if path.is_dir() else path.unlink(missing_ok=True)
+
+    t0 = time.perf_counter()
+    if prep_reused:
+        urec = pycolmap.Reconstruction(out / d.ARTIFACTS["undistorted_model"])
+    else:
+        with colmap_log(runner.log_dir / "colmap.log"):
+            urec = undistort(align_dir / s04_align.ARTIFACTS["model"], sfm_dir / s03_sfm.IMAGE_ROOT, names,
+                             undistorted_dir, options.undistort)
     keys = camera_keys(urec)
     cameras = {keys[cid]: camera_intrinsics(cam) for cid, cam in sorted(urec.cameras.items()) if cid in keys}
     timings["undistort"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    import_colmap(runner, work_dir, undistorted_dir)
-    shutil.copyfile(work_dir / SCENE, work_dir / SCENE_DENSE)  # TextureMesh's scene: cameras and images only
+    if not prep_reused:
+        import_colmap(runner, work_dir, undistorted_dir)
+        shutil.copyfile(work_dir / SCENE, work_dir / SCENE_DENSE)  # TextureMesh's scene: cameras and images only
     timings["import"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    mono_report, mono_rows, good = {"enabled": False}, [], pd.DataFrame({"image": []})
+    mono_report, good = {"enabled": False}, pd.DataFrame({"image": []})
     if options.mono.enabled:
-        mono_report, mono_rows = d._run_mono(urec, undistorted_dir / "images", out, options.mono, True, None)
-        table = pd.DataFrame(mono_rows)
-        write_csv(table, out / d.MONO_ARTIFACTS["mono_fit"], d.MONO_COLUMNS)
-        artifacts.update(d.MONO_ARTIFACTS)
+        if prep_reused:
+            mono_report, table = prep["mono"], pd.read_csv(out / d.MONO_ARTIFACTS["mono_fit"])
+        else:
+            mono_report, mono_rows = d._run_mono(urec, undistorted_dir / "images", out, options.mono, True, None)
+            table = pd.DataFrame(mono_rows)
+            write_csv(table, out / d.MONO_ARTIFACTS["mono_fit"], d.MONO_COLUMNS)
+        artifacts.update({k: v for k, v in d.MONO_ARTIFACTS.items() if (out / v).exists()})
         good = d.good_fits(table, fusion.min_inlier_ratio, fusion.max_residual)
-        mono_views = [FusionView(*v) for v in d.load_mono_views(out, table, fusion.min_inlier_ratio, fusion.max_residual)]
-        mono_points = _mono_points(mono_views, diag, t, fusion)
-        zeros = np.zeros_like(mono_points)
-        write_points(out / d.FUSION_ARTIFACTS["mono_points"], mono_points, zeros, zeros.astype(np.uint8))
+        if not prep_reused:
+            mono_views = [FusionView(*v) for v in
+                          d.load_mono_views(out, table, fusion.min_inlier_ratio, fusion.max_residual)]
+            mono_points = _mono_points(mono_views, diag, t, fusion)
+            zeros = np.zeros_like(mono_points)
+            write_points(out / d.FUSION_ARTIFACTS["mono_points"], mono_points, zeros, zeros.astype(np.uint8))
         artifacts["mono_points"] = d.FUSION_ARTIFACTS["mono_points"]
+    if not prep_reused:
+        write_json({"key": pkey, "mono": mono_report}, out / d.GS_PREP)
     timings["mono"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -196,6 +243,12 @@ def run_gs(
     timings["points"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
+    made, figure_warnings = _figures(splats, views, urec, out, gs, set(good["image"]))
+    artifacts.update(made)
+    warnings += figure_warnings
+    timings["figures"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
     mesh_raw = d._mesh_report(read_mesh(out / d.ARTIFACTS["mesh_raw"]), box)
     dense_stats = d._cloud_stats(xyz, box, diag)
     plots.plot_height_histogram(xyz[:, 2], 0.0, centres[:, 2], out / d.ARTIFACTS["plot_height"])
@@ -226,6 +279,8 @@ def run_gs(
         "peak_vram_mb": round(peak),
         "seed": seed,
         "reused": reused,  # train_s, init_points, mono_views, resumed_from are then those of the run that trained
+        "prep_reused": prep_reused,  # undistortion, import and mono depth of an earlier run (mono timings are its)
+        "novel_views": len(list((out / d.GS_FIGURES["gs_novel"]).glob("*.jpg"))),
         "mesh": mesh_report,
         "gsplat_version": gsplat_version,
     }
@@ -282,3 +337,73 @@ def run_gs(
             "pycolmap": pycolmap.__version__,
         },
     )
+
+
+def _figures(
+    splats: Any, views: list[Any], urec: pycolmap.Reconstruction, out: Path, gs: Any, good: set[str]
+) -> tuple[dict[str, str], list[str]]:
+    """The 2DGS figures (`d.GS_FIGURES`): training curve, held-out views (with one ground truth | render pair),
+    2DGS vs mono depth, and the novel-view frames, video and strip. A figure that fails is a warning.
+    Returns the artifacts made and the warnings."""
+    from recon.dense.gs_render import novel_path, render, render_path
+    from recon.dense.gs_train import load_mono_depth
+
+    files, warnings = d.GS_FIGURES, []
+    path = lambda key: out / files[key]  # noqa: E731
+
+    def attempt(name: str, make: Any) -> None:
+        try:
+            make()
+        except Exception as error:  # a figure never fails the stage
+            warnings.append(f"2DGS figure {name} skipped: {type(error).__name__}: {error}")
+
+    def numpy(r: dict[str, Any]) -> dict[str, np.ndarray]:
+        return {k: v.float().cpu().numpy() for k, v in r.items()}
+
+    attempt("gs_training", lambda: plots.plot_gs_training(pd.read_csv(out / d.GS_ARTIFACTS["train_log"]),
+                                                          path("plot_gs_training")))
+    held = [v for v in views if v.holdout]
+    pool, count = (held, FIGURE_VIEWS[1]) if held else (views, FIGURE_VIEWS[0])
+    picks = [pool[i] for i in sorted(set(np.linspace(0, len(pool) - 1, min(count, len(pool))).round().astype(int)))]
+    renders = {}
+
+    def holdout() -> None:
+        renders.update({v.name: numpy(render(splats, v.K, v.viewmat, v.size, gs.depth)) for v in picks})
+        rows = [{"name": v.name if v.holdout else f"{v.name} (train)", "gt": v.image / 255, **renders[v.name]}
+                for v in picks]
+        plots.plot_gs_holdout(rows, path("plot_gs_holdout"))
+        first = rows[0]
+        gap = np.ones((first["gt"].shape[0], 8, 3))
+        pair = np.concatenate([first["gt"], gap, first["rgb"]], axis=1)
+        cv2.imwrite(str(path("gs_holdout_pair")), (pair[..., ::-1] * 255).round().astype(np.uint8))
+
+    attempt("gs_holdout", holdout)
+
+    def depth_vs_mono() -> None:
+        mono = load_mono_depth(out / d.MONO_ARTIFACTS["mono"], picks, good)
+        rows = [{"name": v.name, **renders[v.name], "mono": mono[v.name][0], "mono_valid": mono[v.name][1]}
+                for v in picks if v.name in mono and v.name in renders]
+        if rows:
+            plots.plot_gs_depth_vs_mono(rows, path("plot_gs_depth_vs_mono"))
+
+    if (out / d.MONO_ARTIFACTS["mono"]).is_dir():
+        attempt("gs_depth_vs_mono", depth_vs_mono)
+
+    def novel() -> None:
+        shutil.rmtree(path("gs_novel"), ignore_errors=True)
+        cams, size = novel_path(urec, gs.novel_views, gs.render_long_side)
+        if not cams:
+            return
+        frames = render_path(splats, cams, size, path("gs_novel"))
+        write_mp4((cv2.imread(str(f))[..., ::-1] for f in frames), path("gs_novel_video"), VIDEO_FPS)
+        tiles = []
+        for i in np.linspace(0, len(cams) - 1, min(STRIP_FRAMES, len(cams))).round().astype(int):
+            r = numpy(render(splats, *cams[i], size))
+            tiles.append((r["rgb"], np.clip((r["normal"] + 1) / 2, 0, 1)))
+        gap = np.ones((size[1], 4, 3))
+        rows = [np.concatenate([x for tile in tiles for x in (tile[k], gap)][:-1], axis=1) for k in (0, 1)]
+        strip = np.concatenate([rows[0], np.ones((4, rows[0].shape[1], 3)), rows[1]])  # RGB over normals
+        cv2.imwrite(str(path("gs_novel_strip")), (strip[..., ::-1] * 255).round().astype(np.uint8))
+
+    attempt("gs_novel", novel)
+    return {k: rel for k, rel in files.items() if (out / rel).exists()}, warnings

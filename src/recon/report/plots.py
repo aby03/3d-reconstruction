@@ -439,3 +439,91 @@ def plot_mono_example(image_bgr: np.ndarray, depth: np.ndarray, confidence: np.n
         ax.set_title(title)
         ax.axis("off")
     return _save(fig, path)
+
+
+def plot_gs_training(log: Mapping[str, np.ndarray], path: Path) -> Path:
+    """2DGS training (`gs/train_log.csv` columns): loss terms (log scale), and train PSNR with the Gaussian count on a
+    second axis, against the iteration; the mean seconds per 1000 iterations in the title."""
+    it = np.asarray(log["iter"], float)
+    fig = Figure(figsize=(12, 4))
+    ax1, ax2 = fig.subplots(1, 2)
+    for term in ("loss", "l1", "ssim", "dist", "normal", "mono"):
+        values = np.asarray(log[term], float)
+        if (values > 0).any():
+            ax1.plot(it[values > 0], values[values > 0], lw=1, marker="." if len(it) < 20 else None,
+                     label="1 - ssim" if term == "ssim" else term)
+    ax1.set_yscale("log")
+    ax1.set_xlabel("iteration")
+    ax1.set_ylabel("loss term")
+    if ax1.lines:
+        ax1.legend(loc="upper right", fontsize=8)
+    ax2.plot(it, log["psnr_train"], lw=1, color="tab:blue")
+    ax2.set_xlabel("iteration")
+    ax2.set_ylabel("train PSNR [dB]", color="tab:blue")
+    count = ax2.twinx()
+    count.plot(it, log["num_gaussians"], lw=1, color="tab:orange")
+    count.set_ylabel("Gaussians", color="tab:orange")
+    sec = np.asarray(log["sec"], float)
+    rate = f", {1000 * sec[-1] / (it[-1] + 1):.1f} s / 1k iterations" if len(it) else ""
+    fig.suptitle(f"2DGS training: {int(it[-1]) + 1 if len(it) else 0} iterations{rate}")
+    return _save(fig, path)
+
+
+def _masked(depth: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    return np.where(valid, depth, np.nan)
+
+
+def plot_gs_holdout(rows: Sequence[Mapping[str, np.ndarray | str]], path: Path) -> Path:
+    """One row per view (keys name, gt, rgb (H,W,3) [0,1], depth, alpha, normal (world)): ground truth, render, mean
+    absolute error, depth (where alpha >= 0.5), normal."""
+    titles = ("ground truth", "render", "|error|", "depth", "normal")
+    h, w = np.asarray(rows[0]["gt"]).shape[:2]
+    fig = Figure(figsize=(15, 3 * len(rows) * h / w + 0.6))
+    axes = fig.subplots(len(rows), 5, squeeze=False)
+    for ax_row, row in zip(axes, rows):
+        valid = np.asarray(row["alpha"]) >= 0.5
+        depth = np.asarray(row["depth"])
+        error = np.abs(np.asarray(row["rgb"]) - np.asarray(row["gt"])).mean(-1)
+        ax_row[0].imshow(row["gt"])
+        ax_row[1].imshow(row["rgb"])
+        ax_row[2].imshow(error, cmap="magma", vmin=0, vmax=0.25)
+        ax_row[3].imshow(_masked(depth, valid), cmap="turbo",
+                         vmax=np.percentile(depth[valid], 98) if valid.any() else None)
+        ax_row[4].imshow(np.clip((np.asarray(row["normal"]) + 1) / 2, 0, 1))
+        ax_row[0].set_ylabel(str(row["name"]), fontsize=8)
+    for k, ax in enumerate(axes.flat):
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if k < 5:
+            ax.set_title(titles[k])
+    return _save(fig, path)
+
+
+def plot_gs_depth_vs_mono(rows: Sequence[Mapping[str, np.ndarray | str]], path: Path) -> Path:
+    """One row per view (keys name, depth, alpha, mono, mono_valid): 2DGS depth, fitted mono depth (same colour
+    range), and their relative difference (2DGS - mono) / mono where both exist."""
+    h, w = np.asarray(rows[0]["depth"]).shape[:2]
+    fig = Figure(figsize=(12, 3 * len(rows) * h / w + 0.6))
+    axes = fig.subplots(len(rows), 3, squeeze=False)
+    for ax_row, row in zip(axes, rows):
+        depth, mono = np.asarray(row["depth"], float), np.asarray(row["mono"], float)
+        valid, mono_valid = np.asarray(row["alpha"]) >= 0.5, np.asarray(row["mono_valid"], bool)
+        both = valid & mono_valid
+        vmax = np.percentile(depth[valid], 98) if valid.any() else None
+        ax_row[0].imshow(_masked(depth, valid), cmap="turbo", vmin=0, vmax=vmax)
+        ax_row[1].imshow(_masked(mono, mono_valid), cmap="turbo", vmin=0, vmax=vmax)
+        rel = np.where(both, (depth - mono) / np.where(mono > 0, mono, 1), np.nan)
+        image = ax_row[2].imshow(rel, cmap="coolwarm", vmin=-0.2, vmax=0.2)
+        median = f"median |rel| {np.median(np.abs(rel[both])):.3f}" if both.any() else "no overlap"
+        ax_row[2].set_xlabel(median, fontsize=8)
+        ax_row[0].set_ylabel(str(row["name"]), fontsize=8)
+    fig.colorbar(image, ax=axes[:, 2].tolist(), shrink=0.8, label="(2DGS - mono) / mono")
+    for k, ax in enumerate(axes.flat):
+        ax.set_xticks([])
+        ax.set_yticks([])
+        if k < 3:
+            ax.set_title(("2DGS depth", "fitted mono depth", "relative difference")[k])
+    fig.set_layout_engine("constrained")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=100)
+    return path

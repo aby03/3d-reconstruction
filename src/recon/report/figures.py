@@ -1,5 +1,6 @@
 """Figures of a run: offscreen renders of its outputs (VTK) and the camera path, joined into a few titled figures
-(`overview`, `stages`, `path`, `details`) that the report links and the README uses.
+(`overview`, `stages`, `path`, `details`, and `gaussians` under dense backend 2dgs) that the report links and the
+README uses.
 
 Rendering needs an OpenGL window (X, EGL or OSMesa through VTK) and can crash on a headless machine, so the report runs
 `python -m recon.report.figures spec.json` in a subprocess (`build_figures`): a failure loses the figures, never the run.
@@ -53,6 +54,15 @@ FIGURES = {  # figure -> (columns, panel width, [(panel, title)])
             ("detail_mono", "mono depth fitted to the SfM points"),
             ("detail_tracks", "SfM track lengths"),
             ("detail_reprojection", "SfM reprojection error"),
+        ],
+    ),
+    "gaussians": (  # backend 2dgs only
+        3,
+        600,
+        [
+            ("gs_novel", "2DGS novel views: RGB over normals, along the walk lifted and pitched down"),
+            ("gs_holdout", "2DGS held-out view: ground truth | render"),
+            ("gs_mesh", "2DGS mesh: TSDF of the rendered depth (mesh_raw.ply)"),
         ],
     ),
 }
@@ -372,6 +382,12 @@ def build(run: Path, sequence_dirs: dict[str, Path], out: Path, options: FigureO
         ("detail_reprojection.png", "03_sfm/reports/plots/reproj_hist.png"),
     ):
         attempt(name, lambda name=name, rel=rel: copy(run / rel, name))
+
+    dense = run / "05_dense"
+    if (dense / "gs" / "splats.ply").is_file():
+        attempt("gs_novel", lambda: copy(dense / "gs/novel_strip.png", "gs_novel.png"))
+        attempt("gs_holdout", lambda: copy(dense / "gs/holdout_pair.jpg", "gs_holdout.png"))
+        attempt("gs_mesh", lambda: render_mesh(dense / "mesh_raw.ply", panels / "gs_mesh.png", box, size, **view))
 
     made = []
     for name, (columns, width, parts) in FIGURES.items():

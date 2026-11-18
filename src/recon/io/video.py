@@ -138,3 +138,20 @@ class NvdecVideoReader:
             _, err = proc.communicate()
         if proc.returncode and (last is None or idx <= last):
             raise RuntimeError(f"ffmpeg NVDEC decode of {self.path} failed: {err.decode(errors='replace').strip()}")
+
+
+def write_mp4(frames: Iterable[np.ndarray], path: Path, fps: int = 24) -> Path:
+    """H.264 mp4 of RGB uint8 frames (H,W,3), all one size; odd sizes lose their last row / column (yuv420p)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(path), "w") as container:
+        stream = None
+        for frame in frames:
+            h, w = frame.shape[0] // 2 * 2, frame.shape[1] // 2 * 2
+            if stream is None:
+                stream = container.add_stream("libx264", rate=fps)
+                stream.width, stream.height, stream.pix_fmt = w, h, "yuv420p"
+            image = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame[:h, :w]), format="rgb24")
+            container.mux(stream.encode(image))
+        if stream is not None:
+            container.mux(stream.encode())
+    return path

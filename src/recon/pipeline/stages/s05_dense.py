@@ -106,6 +106,20 @@ GS_DIR = "gs"  # backend 2dgs: the training outputs, kept for a re-run whose tra
 GS_CACHE = f"{GS_DIR}/cache.json"
 GS_ARTIFACTS = {"splats": f"{GS_DIR}/splats.ply", "train_log": f"{GS_DIR}/train_log.csv", "holdout": f"{GS_DIR}/holdout.json"}
 OPENMVS_ONLY = ("scene_dense_points", "mesh_openmvs")  # ARTIFACTS that backend 2dgs does not write
+GS_FIGURES = {  # backend 2dgs, written when they can be made
+    "plot_gs_training": "reports/gs_training.png",
+    "plot_gs_holdout": "reports/gs_holdout.png",
+    "plot_gs_depth_vs_mono": "reports/gs_depth_vs_mono.png",
+    "gs_holdout_pair": f"{GS_DIR}/holdout_pair.jpg",
+    "gs_novel": f"{GS_DIR}/novel",
+    "gs_novel_video": f"{GS_DIR}/novel.mp4",
+    "gs_novel_strip": f"{GS_DIR}/novel_strip.png",
+}
+GS_PREP = "gs_prep.json"  # backend 2dgs: key of the undistortion, import and mono depth kept for the next run
+GS_PREP_KEEP = [
+    ARTIFACTS["undistorted"], WORK_DIR, MONO_ARTIFACTS["mono"], MONO_ARTIFACTS["mono_fit"],
+    MONO_ARTIFACTS["plot_mono_fit"], MONO_ARTIFACTS["plot_mono_example"], FUSION_ARTIFACTS["mono_points"], GS_PREP,
+]
 PREVIEW_DIR = "preview"
 MONO_COLUMNS = ["image", "points", "inliers", "inlier_ratio", "median_rel_residual", "median_rel_residual_all",
                 "scale", "shift", "fitted", "reason", "mesh_used", "mesh_pixels_frac", "mesh_median_rel_residual"]
@@ -921,6 +935,22 @@ def run_dense(
     )
 
 
+def _clear_except(root: Path, keep: list[str]) -> None:
+    """Remove everything under `root` but the paths `keep` (relative to `root`, may be nested)."""
+
+    def walk(folder: Path, rel: str) -> None:
+        for path in folder.iterdir():
+            name = f"{rel}{path.name}"
+            if name in keep:
+                continue
+            if path.is_dir() and any(k.startswith(f"{name}/") for k in keep):
+                walk(path, f"{name}/")
+            else:
+                shutil.rmtree(path) if path.is_dir() else path.unlink()
+
+    walk(root, "")
+
+
 @register_stage
 class DenseStage(Stage):
     name = STAGE
@@ -938,12 +968,13 @@ class DenseStage(Stage):
         reuses them when their inputs are unchanged and clears them otherwise); the rest is removed, so nothing
         of the other backend is left."""
         out = self.out
-        keep, marker = ([GS_DIR], GS_CACHE) if self.options.backend == "2dgs" else (CHAIN_KEEP, CHAIN_FILE)
-        if not (out / marker).is_file():
+        if self.options.backend == "2dgs":
+            keep, markers = [GS_DIR, *GS_PREP_KEEP], (GS_CACHE, GS_PREP)
+        else:
+            keep, markers = CHAIN_KEEP, (CHAIN_FILE,)
+        if not any((out / marker).is_file() for marker in markers):
             return super().prepare()
-        for path in out.iterdir():
-            if path.name not in keep:
-                shutil.rmtree(path) if path.is_dir() else path.unlink()
+        _clear_except(out, keep)
 
     def run(self) -> StageOutput:
         device = self.ctx.config.device

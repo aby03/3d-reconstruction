@@ -12,7 +12,7 @@ from recon.io.tables import read_json, write_json
 from recon.pipeline.config import PipelineConfig, config_dict, load_config
 from recon.pipeline.run_dir import RUN_MANIFEST_NAME, now_iso, read_manifest
 from recon.pipeline.stage import Stage, StageOutput, register_stage, registered_stages
-from recon.pipeline.stages import s06_mesh_post, s07_export
+from recon.pipeline.stages import s05_dense, s06_mesh_post, s07_export
 from recon.report import ReportOptions
 from recon.report.figures import build_figures
 from recon.report.html import render
@@ -45,8 +45,25 @@ def config_diff(config: PipelineConfig, defaults: PipelineConfig) -> dict[str, d
     return {k: {"default": theirs.get(k), "value": v} for k, v in ours.items() if theirs.get(k) != v}
 
 
-def _extras(name: str, path: Path) -> dict[str, Any]:
-    """Report fields beyond the manifest: the planes and the geometry check of mesh_post, the export's files."""
+GS_KEYS = ("iterations", "step", "finished", "num_gaussians", "train_s", "holdout_psnr", "holdout_ssim", "peak_vram_mb",
+           "novel_views")
+GS_IMAGES = ("plot_gs_training", "plot_gs_holdout", "plot_gs_depth_vs_mono", "gs_novel_strip")
+
+
+def _extras(name: str, path: Path, out: Path) -> dict[str, Any]:
+    """Report fields beyond the manifest: the 2DGS block of dense (its numbers, figures and video, paths relative to
+    the report dir `out`), the planes and the geometry check of mesh_post, the export's files."""
+    if name == s05_dense.STAGE:
+        report = read_json(path / s05_dense.ARTIFACTS["report"])
+        if report.get("dense_backend") != "2dgs":
+            return {}
+        rel = lambda key: os.path.relpath(path / s05_dense.GS_FIGURES[key], out)  # noqa: E731
+        video = path / s05_dense.GS_FIGURES["gs_novel_video"]
+        return {"gs": {
+            **{k: report["gs"].get(k) for k in GS_KEYS},
+            "images": [rel(k) for k in GS_IMAGES if (path / s05_dense.GS_FIGURES[k]).is_file()],
+            "video": rel("gs_novel_video") if video.is_file() else None,
+        }}
     if name == s06_mesh_post.STAGE:
         report = read_json(path / s06_mesh_post.ARTIFACTS["report"])
         qa = report["qa"]
@@ -80,7 +97,7 @@ def stage_entry(name: str, sequence_id: str | None, path: Path, out: Path) -> di
         ],
     }
     if manifest.status == "success":
-        extras = _extras(name, path)
+        extras = _extras(name, path, out)
         entry["metrics"] |= extras.pop("derived", {})
         entry |= extras
     if name == s07_export.STAGE:
