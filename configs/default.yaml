@@ -221,7 +221,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     local_cell_px: 32            # correction grid cell, pixels of the network output
     local_clip: 0.25             # the correction changes the inverse depth by at most this fraction
     local_prior_pixels: 20.0     # a cell needs about this many mesh pixels for its full correction
-  fusion:                        # TSDF of the fitted mono depth (Open3D, CPU) -> mesh_tsdf.ply, the gap filler merged in mesh_post; ignored under backend: 2dgs
+  fusion:                        # TSDF of the fitted mono depth (Open3D, CPU) -> mesh_tsdf.ply, the gap filler merged in mesh_post; under backend: 2dgs only voxel_tau, trunc_tau, max_depth_frac and min_weight apply (TSDF of the rendered depth)
     enabled: true
     tau: null                    # geometry tolerance; null = as mesh_post (0.005 * diag in arbitrary units, 0.02 in metres)
     voxel_tau: 0.8               # voxel size in tau (~diagonal / 256)
