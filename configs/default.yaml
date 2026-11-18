@@ -254,7 +254,6 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     long_side: 960               # training images scaled to this long side
     iterations: 7000             # geometry stops improving by 7k (15k: same holes, +0.5 dB, 1.8x the time)
     max_gaussians: 500000        # cap on the Gaussian count, the main time knob (500k at 960 px: ~3.2 GB VRAM)
-    strategy: mcmc               # mcmc (relocation, grows to the cap) | default (gradient densification, pruned to the cap)
     holdout_every: 8             # every n-th view is not trained on (held-out metrics)
     sh_degree: 3
     lambda_dssim: 0.2
