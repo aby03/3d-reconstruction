@@ -198,6 +198,29 @@ def test_view_splats(backend_run, capsys):
     print(f"viewer check + serve {time.perf_counter() - t0:.1f} s")
 
 
+def test_compare_dense(smoke_run, backend_run, tmp_path, capsys):
+    """The comparison page of the OpenMVS smoke run and its 2dgs copy; runs with other aligned models are refused."""
+    script = str(Path(__file__).parents[1] / "scripts" / "compare_dense.py")
+    out, t0 = tmp_path / "compare", time.perf_counter()
+    argv = ["compare_dense.py", "--a", str(smoke_run.run_dir), "--b", str(backend_run[0]), "--out", str(out), "--views", "4"]
+    with mock.patch.object(sys, "argv", argv):
+        runpy.run_path(script, run_name="__main__")
+    page = (out / "index.html").read_text()
+    names = ["time_dense", "hole_masks", "mesh_0", "mesh_1", "mesh_2", "novel_A", "novel_B", "novel_2dgs"]
+    names += [f"textured_{k}" for k in range(len(list(out.glob("textured_*.png"))))]
+    assert "textured_0" in names
+    for name in names:
+        assert (out / f"{name}.png").stat().st_size > 0 and f'src="{name}.png"' in page, name
+    assert "Error" not in page and not list(out.glob("_*.png"))
+    print(capsys.readouterr().out, f"compare page {time.perf_counter() - t0:.1f} s")
+
+    other = tmp_path / "other"
+    (other / "04_alignment" / "sparse_aligned").mkdir(parents=True)
+    (other / "04_alignment" / "sparse_aligned" / "cameras.bin").write_bytes(b"x")
+    with mock.patch.object(sys, "argv", [*argv[:2], str(other), *argv[3:]]), pytest.raises(SystemExit, match="refusing"):
+        runpy.run_path(script, run_name="__main__")
+
+
 def _frames(video) -> int:
     with av.open(str(video)) as container:
         return sum(1 for _ in container.decode(video=0))

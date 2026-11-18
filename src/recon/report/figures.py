@@ -140,21 +140,38 @@ def render_glb(glb: Path, path: Path, bounds: np.ndarray, size: tuple[int, int],
     return _save(window, path)
 
 
-def render_from_camera(glb: Path, rec: pycolmap.Reconstruction, name: str, path: Path, height: int) -> Path:
-    """The glb seen from the pose of the registered image `name` (the model's Z up frame becomes the glb's Y up:
-    (x, y, z) -> (x, z, -y))."""
+Pose = tuple[np.ndarray, np.ndarray, float, tuple[int, int]]  # cam_from_world R, centre, vertical fov (deg), (w, h)
+
+
+def camera_pose(rec: pycolmap.Reconstruction, name: str, height: int) -> Pose:
+    """The pose of the registered image `name`, at `height` pixels."""
     image = next(im for im in rec.images.values() if im.name == name)
     model = image.camera
-    renderer, window = _glb_scene(glb, (round(height * model.width / model.height), height))
+    fov = float(np.degrees(2 * np.arctan(model.height / (2 * model.mean_focal_length()))))
+    size = (round(height * model.width / model.height), height)
+    return image.cam_from_world().rotation.matrix(), image.projection_center(), fov, size
+
+
+def render_poses(glb: Path, poses: list[Pose], paths: list[Path]) -> list[Path]:
+    """The glb (imported once) seen from each pose of the model's Z up frame, which becomes the glb's Y up:
+    (x, y, z) -> (x, z, -y)."""
+    renderer, window = _glb_scene(glb, poses[0][3])
     to_glb = lambda v: np.array([v[0], v[2], -v[1]])  # noqa: E731
-    R, centre = image.cam_from_world().rotation.matrix(), image.projection_center()
     camera = renderer.GetActiveCamera()
-    camera.SetPosition(*to_glb(centre))
-    camera.SetFocalPoint(*to_glb(centre + R[2]))
-    camera.SetViewUp(*to_glb(-R[1]))
-    camera.SetViewAngle(float(np.degrees(2 * np.arctan(model.height / (2 * model.mean_focal_length())))))
-    camera.SetClippingRange(0.02, 200.0)
-    return _save(window, path)
+    for (R, centre, fov, size), path in zip(poses, paths):
+        window.SetSize(*size)
+        camera.SetPosition(*to_glb(centre))
+        camera.SetFocalPoint(*to_glb(centre + R[2]))
+        camera.SetViewUp(*to_glb(-R[1]))
+        camera.SetViewAngle(fov)
+        camera.SetClippingRange(0.02, 200.0)
+        _save(window, path)
+    return paths
+
+
+def render_from_camera(glb: Path, rec: pycolmap.Reconstruction, name: str, path: Path, height: int) -> Path:
+    """The glb seen from the pose of the registered image `name`."""
+    return render_poses(glb, [camera_pose(rec, name, height)], [path])[0]
 
 
 def render_mesh(ply: Path, path: Path, bounds: np.ndarray, size: tuple[int, int], **view: Any) -> Path:

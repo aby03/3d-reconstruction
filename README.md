@@ -115,6 +115,12 @@ pixi run -e gsplat view-splats --run outputs/<scene>/runs/<run_id> --check      
 
 The "Splats" panel switches RGB / depth / normal, sets the resolution scale, depth colour range and background, toggles the input camera frustums (click one, or pick a camera number, to jump to it), plays the novel-view path and, with `--mesh`, toggles `mesh_final_geometry` (decimated to 300k faces) over the splats.
 
+Backend comparison of two runs with the same aligned model (time, hole share, geometry, mesh and textured renders with PSNR at held-out cameras, novel views, `recon compare`); what an older run lacks shows as n/a:
+
+```bash
+pixi run python scripts/compare_dense.py --a RUN_OPENMVS --b RUN_2DGS --out <dir> [--views 24] [--skip-holes]  # <dir>/index.html
+```
+
 `08_report/figures/` holds `overview.png`, `stages.png`, `path.png` (camera path from above with numbered waypoints) and `details.png`, rendered offscreen from the run (config `report.figures`; no OpenGL window: a warning, the run still succeeds). `08_report/index.html` links them and shows the thresholds (registered ratio, reprojection error, gravity residual, untextured faces, wall RMS, dense-to-mesh p95) with pass/fail.
 
 ## Run summary and results
