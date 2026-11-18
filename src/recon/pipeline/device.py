@@ -2,6 +2,7 @@
 
 import functools
 import importlib
+import importlib.metadata
 import logging
 import platform
 import re
@@ -159,3 +160,11 @@ def tool_versions() -> dict[str, str | None]:
             match = None
         versions[label] = match.group(1) if match else "?"
     return versions
+
+
+def optional_version(package: str) -> str | None:
+    """Installed version of an optional package, read without importing it (gsplat compiles on import); None when missing."""
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return None

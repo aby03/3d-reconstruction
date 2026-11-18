@@ -1,3 +1,5 @@
+import importlib.util
+
 import numpy as np
 import pytest
 import trimesh
@@ -13,7 +15,7 @@ from recon.dense.openmvs import (
     oom_retry_options,
 )
 from recon.io.tools import ToolError, ToolResult
-from recon.pipeline.config import PipelineConfig, load_config, select_hardware
+from recon.pipeline.config import ConfigError, PipelineConfig, load_config, select_hardware
 from recon.pipeline.device import DeviceInfo, probe_device
 
 TOOLS = ["InterfaceCOLMAP", "DensifyPointCloud", "ReconstructMesh", "RefineMesh", "TextureMesh"]
@@ -48,6 +50,18 @@ def test_simplerecon_smoke(smoke_run, output_root, tmp_path):
         "dense.simplerecon.scale=10.0",
     )
     assert_stage_ok(run_dir / "05_dense")
+
+
+def test_gs_config(tmp_path):
+    from recon.pipeline.stages.s05_dense import run_dense
+
+    config = load_config(overrides=["dense.backend=2dgs"])
+    assert config.dense.gs.iterations == 7000 and config.dense.gs.depth == "median"
+    with pytest.raises(ConfigError, match=r"dense\.backend"):
+        load_config(overrides=["dense.backend=nerf"])
+    if importlib.util.find_spec("gsplat") is None:
+        with pytest.raises(ConfigError, match="pixi run -e gsplat"):
+            run_dense(tmp_path, tmp_path, tmp_path, config.dense, None)
 
 
 def test_hardware_presets():

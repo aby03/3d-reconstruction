@@ -35,6 +35,12 @@ dense:
   fusion:
     voxel_tau: 3.0
     trunc_tau: 12.0
+  gs:                            # used only with backend: 2dgs
+    long_side: 160
+    iterations: 50
+    max_gaussians: 20000
+    render_long_side: 120
+    novel_views: 4
 mesh_post:
   consistency: {pixel_stride: 8}
   decimate:

@@ -156,9 +156,10 @@ align:                           # world frame W: Z up, gravity -Z, floor z = 0,
     max_offset_ms: 100.0         # time offsets searched in +-this, 1 ms steps
 
 dense:                           # step 5: undistort the aligned model, OpenMVS densify + mesh (CUDA per device.preference)
+  backend: openmvs               # openmvs | 2dgs (2D Gaussian Splatting, see gs; needs `pixi run -e gsplat`)
   undistort:
     max_image_size: -1           # -1: full resolution (1080x1920 keyframes -> 1043x1857 PINHOLE)
-  openmvs:
+  openmvs:                       # ignored under backend: 2dgs (except bin_dir)
     resolution_level: 0          # images scaled down by 2^level before patch match ... (level 0: full-resolution views, 3x the time of level 1)
     min_resolution: 640          #   ... but the long side never below this (level 2 = level 1 on 1857 px images)
     max_resolution: 2560
@@ -172,7 +173,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     crop_to_roi: false           # OpenMVS's estimated ROI (densify and mesh) cuts the upper walls (30% of the points on tiny)
     keep_dmaps: false            # depth maps (~11.6 MB per image at level 1) are removed after fusion
     bin_dir: null                # null: OpenMVS from PATH (pixi adds .local/openmvs/bin/OpenMVS)
-  filter:                        # outlier removal on the dense cloud before ReconstructMesh (the mesh is cropped to the box before RefineMesh)
+  filter:                        # outlier removal on the dense cloud before ReconstructMesh (the mesh is cropped to the box before RefineMesh); ignored under backend: 2dgs
     enabled: true
     roi:                         # drop points outside the dense span of each axis (same box as mesh_post.roi); off: keep the whole scene
       enabled: false
@@ -220,7 +221,7 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     local_cell_px: 32            # correction grid cell, pixels of the network output
     local_clip: 0.25             # the correction changes the inverse depth by at most this fraction
     local_prior_pixels: 20.0     # a cell needs about this many mesh pixels for its full correction
-  fusion:                        # TSDF of the fitted mono depth (Open3D, CPU) -> mesh_tsdf.ply, the gap filler merged in mesh_post
+  fusion:                        # TSDF of the fitted mono depth (Open3D, CPU) -> mesh_tsdf.ply, the gap filler merged in mesh_post; ignored under backend: 2dgs
     enabled: true
     tau: null                    # geometry tolerance; null = as mesh_post (0.005 * diag in arbitrary units, 0.02 in metres)
     voxel_tau: 0.8               # voxel size in tau (~diagonal / 256)
@@ -230,13 +231,13 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     max_residual: 0.05           # ... and whose median relative residual is at most this
     min_weight: 2.0              # a surface voxel needs this many views
     point_stride: 4              # every n-th pixel of each view goes into mono_points.ply
-  mesh:                          # ReconstructMesh
+  mesh:                          # ReconstructMesh; ignored under backend: 2dgs
     remove_spurious: 20          # remove faces with too long edges / isolated components (0: off)
     remove_spikes: true
     close_holes: 30              # close holes up to this many edges (0: off)
     smooth: 2                    # smoothing iterations
     decimate: 1.0                # 1: no decimation
-  refine:                        # RefineMesh -> mesh_refined.ply (disabled or timed out: a copy of mesh_raw.ply)
+  refine:                        # RefineMesh -> mesh_refined.ply (disabled or timed out: a copy of mesh_raw.ply); ignored under backend: 2dgs
     enabled: true
     use_cuda: false              # true: follows device.preference (room2: CPU 16.7 min, CUDA 20.3 min + 3.2 GB VRAM)
     resolution_level: 0          # refine against full-resolution views
@@ -245,10 +246,27 @@ dense:                           # step 5: undistort the aligned model, OpenMVS 
     scales: 2
     regularity_weight: 0.2       # photo-consistency vs smoothness (higher: flatter walls)
     max_minutes: 240             # killed after this; the raw mesh is kept
-  preview:                       # TextureMesh at low resolution into preview/ (seam leveling off)
+  preview:                       # TextureMesh at low resolution into preview/ (seam leveling off); ignored under backend: 2dgs
     enabled: true
     resolution_level: 2
     min_resolution: 320
+  gs:                            # 2D Gaussian Splatting (gsplat), used when backend: 2dgs
+    long_side: 960               # training images scaled to this long side
+    iterations: 7000             # geometry stops improving by 7k (15k: same holes, +0.5 dB, 1.8x the time)
+    max_gaussians: 500000        # cap on the Gaussian count, the main time knob (500k at 960 px: ~3.2 GB VRAM)
+    strategy: mcmc               # mcmc (relocation, grows to the cap) | default (gradient densification, pruned to the cap)
+    holdout_every: 8             # every n-th view is not trained on (held-out metrics)
+    sh_degree: 3
+    lambda_dssim: 0.2
+    lambda_distortion: 0.01      # 2DGS depth distortion
+    lambda_normal: 0.05          # 2DGS normal consistency
+    mono_weight: 0.1             # relative L1 of the rendered depth to the fitted mono depth (0: off)
+    init_mono_points: 100000     # mono points added to the SfM init points
+    render_long_side: 640        # depth renders for the TSDF mesh
+    depth: median                # median | expected depth for the TSDF
+    min_alpha: 0.5               # pixels with less accumulated opacity are not fused
+    novel_views: 120             # frames of the novel-view path (0: none)
+    seed: null                   # null: run.seed
 
 mesh_post:                       # step 6: clean, fill small holes, flatten planes, decimate the dense mesh, texture it with OpenMVS (CUDA per device.preference)
   input: refined                 # refined | raw (05_dense/mesh_refined.ply is the raw mesh when refine was off)

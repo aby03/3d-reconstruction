@@ -20,6 +20,7 @@ def test_chain_key_follows_the_openmvs_inputs_only(tmp_path):
     other.fusion.min_weight = 5.0
     other.mono.edge_rel = 0.1
     other.simplerecon.scale = 3.0
+    other.gs.iterations = 50
     assert _key(other, tmp_path) == base
     # the OpenMVS steps and the aligned model do
     for change in (

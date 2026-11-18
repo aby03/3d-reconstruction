@@ -3,6 +3,7 @@ world W, in `05_dense/`."""
 
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ from recon.io.tables import read_json, write_csv, write_json, write_npz
 from recon.io.tools import ToolRunner
 from recon.mesh.cleanup import cleanup
 from recon.mesh.qa import tau as geometry_tau
+from recon.pipeline.config import ConfigError
 from recon.pipeline.device import Backend
 from recon.pipeline.run_dir import manifest_hash
 from recon.pipeline.stage import Stage, StageOutput, register_stage
@@ -697,6 +699,8 @@ def run_dense(
     CUDA tool that runs out of memory (after the lower-resolution retry for densify) runs again on the CPU;
     `hardware` (the config's preset name) only goes into the report."""
     options = options or DenseOptions()
+    if options.backend == "2dgs" and importlib.util.find_spec("gsplat") is None:
+        raise ConfigError("dense.backend: 2dgs needs gsplat; run it in its env: pixi run -e gsplat recon ...")
     timings, warnings = {}, []
     artifacts = dict(ARTIFACTS)
 

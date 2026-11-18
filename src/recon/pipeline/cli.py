@@ -10,7 +10,7 @@ from typing import Any
 from recon.capture.open_camera_sensors import OpenCameraSensorsLoader
 from recon.io.tables import read_json, to_jsonable
 from recon.pipeline.config import ConfigError, PipelineConfig, load_config, resolve_hardware
-from recon.pipeline.device import CAPABILITIES, probe_device, resolve_backend, tool_versions
+from recon.pipeline.device import CAPABILITIES, optional_version, probe_device, resolve_backend, tool_versions
 from recon.pipeline.run_dir import latest_run_dir, read_manifest, scene_dir, setup_logging
 from recon.pipeline.runner import PipelineError, open_run, run_stages, scene_path, select_stages
 from recon.pipeline.stage import get_stage, registered_stages
@@ -162,6 +162,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _print_table({name: version or "MISSING" for name, version in versions.items()})
     if missing := [name for name, version in versions.items() if version is None]:
         print(f"missing: {', '.join(missing)}")
+    print("optional (own pixi env):")
+    _print_table({"gsplat": optional_version("gsplat") or "not installed"})
     return 0
 
 
