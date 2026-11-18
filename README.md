@@ -1,8 +1,12 @@
 # 3D room reconstruction
 
-Turns a phone video with IMU data (Open Camera Sensors capture) into a textured, plane-regularized room mesh. SfM with COLMAP/GLOMAP, dense reconstruction and texturing with OpenMVS (CUDA), monocular-depth gap filling, and an HTML quality report.
+Turns a phone video with IMU data (Open Camera Sensors capture) into a textured, plane-regularized room mesh. SfM with COLMAP/GLOMAP, then one of two dense backends: OpenMVS (CUDA) with monocular-depth gap filling, or 2D Gaussian splatting (gsplat), which fills far more of the room and also gives photo-real novel views. Texturing with OpenMVS and an HTML quality report for both.
 
-![hotel1: dense fused point cloud and textured model](results/hotel1/overview.png)
+A novel view of the hotel1 reconstruction, from one viewpoint high in a room corner where no input camera was:
+
+![Novel view of hotel1: OpenMVS textured mesh, 2DGS splat render, SfM points, camera path](results/hotel1/hero.png)
+
+Top: the OpenMVS textured mesh (white: no surface) and the 2DGS splat render. Bottom: the SfM sparse points from the same viewpoint, and the same with the camera path of the walk (blue start to red end, arrows: viewing direction of every 12th camera).
 
 The example capture `data/hotel1` (a hotel room: one 3146-frame phone video, 53 sharper reference stills and the IMU streams) ships in Git LFS; the results below are from it. The figures are rendered from the run's outputs by the report stage for every dataset (`08_report/figures/`); `scripts/make_readme_figures.py --run <run dir>` copies them to `results/`.
 
@@ -17,6 +21,7 @@ git clone --recurse-submodules https://github.com/aby03/3d-reconstruction.git &&
 pixi install                                                    # 3. main environment
 pixi install -e build && pixi run -e build openmvs              # 4. OpenMVS (develop) with CUDA (minutes, once)
 pixi run recon doctor                                           # 5. GPU, CUDA paths, tool versions
+pixi install -e gsplat                                          # 6. optional: 2DGS backend (gsplat compiles its CUDA code on first use, minutes)
 ```
 
 Already cloned without submodules or LFS: `git submodule update --init --recursive`, `git lfs pull`. Step 4 builds two small dependencies from source (`halfmesh`, `tinyply`), applies `patches/openmvs-no-sfm.patch` (skips OpenMVS's own SfM library and its two apps, which we do not use and which need packages conda-forge lacks) and builds the `develop` branch of OpenMVS: it contains the TextureMesh fix for `--resolution-level` above 0 that made the 2.1 build hang.
@@ -24,11 +29,18 @@ Already cloned without submodules or LFS: `git submodule update --init --recursi
 ## Run
 
 ```bash
-pixi run recon run --input data/hotel1                 # every stage
+pixi run recon run --input data/hotel1                 # every stage, dense backend OpenMVS (default)
+pixi run -e gsplat recon run --input data/hotel1 --set dense.backend=2dgs   # every stage, dense backend 2DGS
 pixi run recon run --input data/hotel1 --to keyframes  # stop after a stage
 pixi run recon run --input data/hotel1 --resume        # continue the latest run, skipping up-to-date stages
 pixi run recon compare RUN_A RUN_B --scene hotel1      # metrics of two runs side by side
 pixi run recon list-stages
+```
+
+Switch an existing run to 2DGS, reusing its SfM and alignment, or continue an interrupted 2DGS training (`dense.gs.max_minutes` stops it after that long; the same command continues from `05_dense/gs/ckpt.pt`):
+
+```bash
+pixi run -e gsplat recon run --input data/hotel1 --resume RUN_ID --from dense --force dense --set dense.backend=2dgs [--set dense.gs.max_minutes=30]
 ```
 
 Per-sequence stages write to `outputs/<scene>/sequences/<id>/<NN_stage>/`, scene stages to `outputs/<scene>/runs/<run_id>/<NN_stage>/`. A stage whose inputs and config are unchanged is skipped.
@@ -78,10 +90,10 @@ Notes from the two captures used so far (`hotel1`, `room2`: about one minute eac
 | 2 | `keyframes` | scores blur/exposure/motion, picks keyframes (adaptive to image motion and gyro); adds the reference stills as camera `cam1` | `images/cam0`, `images/cam1`, IMU priors |
 | 3 | `sfm` | SIFT features (ALIKED, DISK, SuperPoint selectable), exhaustive or time-neighbour and loop matching, COLMAP global mapper with gravity priors and a drift-aware gyro pair filter, then refinement; checks that the camera path is continuous in time (jumps, isolated cameras, gyro and accelerometer windows, magnetometer) and re-maps with the incremental mapper when the path comes out in pieces | `sparse/refined`, `sfm_report.json` |
 | 4 | `align` | world frame: Z up, floor at z = 0, X/Y along the walls; checks camera–IMU calibration | `sparse_aligned`, `transform.json` |
-| 5 | `dense` | undistort, OpenMVS densify (fusion filter 1), mesh and refine, outlier filter, Depth-Anything-V2 mono depth fitted to the mesh depth, TSDF fusion | `dense_points.ply`, `mesh_refined.ply`, `mesh_tsdf.ply` |
-| 6 | `mesh_post` | cleanup, gap fill from mono depth, hole closing, view-consistency check, plane snapping, decimation to 2M faces, texturing with seam leveling, texture fixes, QA | `mesh_final_geometry.ply`, `textured_fixed/` |
+| 5 | `dense` | `openmvs`: undistort, OpenMVS densify (fusion filter 1), mesh and refine, outlier filter, Depth-Anything-V2 mono depth fitted to the mesh depth, TSDF fusion. `2dgs`: undistort, mono depth, train 2D Gaussians (gsplat, mono-depth prior), TSDF fusion of their rendered depth, held-out PSNR, novel-view video | `dense_points.ply`, `mesh_refined.ply`, `mesh_tsdf.ply`; 2dgs also `gs/splats.ply`, `gs/novel.mp4` |
+| 6 | `mesh_post` | cleanup, gap fill from mono depth, hole closing, view-consistency check (OpenMVS only), plane snapping, decimation to 2M faces, texturing with seam leveling, texture fixes, QA | `mesh_final_geometry.ply`, `textured_fixed/` |
 | 7 | `export` | GLB (Y up), OBJ, PLY, STL, point clouds, cameras (COLMAP, nerfstudio `transforms.json`), `metadata.json`; every file is reloaded and checked | `07_export/` |
-| 8 | `report` | thresholds on every stage, one HTML page | `08_report/index.html` |
+| 8 | `report` | thresholds on every stage, hole share of the raw and final mesh, one HTML page | `08_report/index.html` |
 
 Each stage also runs alone (`pixi run recon <stage> --input data/hotel1`) and writes `stage_manifest.json` plus a `reports/` folder with its metrics and plots.
 
@@ -126,10 +138,15 @@ pixi run python scripts/compare_dense.py --a RUN_OPENMVS --b RUN_2DGS --out <dir
 ## Run summary and results
 
 ```bash
-pixi run recon run --input data/hotel1
+pixi run recon run --input data/hotel1                                     # OpenMVS
+pixi run -e gsplat recon run --input data/hotel1 --set dense.backend=2dgs  # 2DGS
 ```
 
-Run `20261105_093901` on a GTX 1660 Ti (6 GB), `cuda_6gb` preset, with `mesh_post`, `export` and `report` rerun on the current defaults. All 10 report thresholds pass.
+hotel1 on a GTX 1660 Ti (6 GB), `cuda_6gb` preset. Both runs share everything up to `align` (the 2DGS run `20261118_2dgs` started from a copy of the OpenMVS run `20261105_093901` with `--from dense`), so the cameras are identical and only the dense step and what follows differ. The OpenMVS run is on the code of 2026-11-05. Stage times come from `08_report/summary.json`.
+
+### Shared steps: ingest to align
+
+Both backends start from the same capture, keyframes, SfM model and alignment.
 
 | Stage | Time | Result |
 |---|---|---|
@@ -137,26 +154,80 @@ Run `20261105_093901` on a GTX 1660 Ti (6 GB), `cuda_6gb` preset, with `mesh_pos
 | `keyframes` | 79 s | 322 keyframes + 53 stills |
 | `sfm` | 927 s | 372 of 375 images registered, 31,566 points, 0.67 px mean reprojection error |
 | `align` | 7 s | gravity residual 0.96 deg (median), floor tilt 0.46 deg |
-| `dense` | 5458 s | 11.6 M dense points, mesh 4.1 M faces, 2.4 M after refine |
-| `mesh_post` | 699 s | 2.0 M faces, 2 texture atlases, 0 % untextured faces, wall RMS 0.03 % of the diagonal |
-| `export` | 100 s | `model.glb` 156.1 MB, cameras re-project within 0.075 px |
-| total | 7289 s (2.0 h) | sum of the stage times |
 
-The stage times come from `08_report/summary.json`; the first four stages of this run were produced in earlier invocations of the same run directory (`--resume`) and `dense` finished in 91 min on the OpenMVS `develop` build (the 2.1 build needed about 2.4 times as long for densify alone). The renders below are unretouched: the mesh still has holes where nothing was seen well (floor beside the bed, behind furniture) and noisy surfaces on furniture. Seen from the keyframes, 4.5 % of the surface is missing from the final mesh (`scripts/hole_share.py`).
+#### Inputs and SfM model
 
-![Pipeline stages](results/hotel1/stages.png)
+What goes in, and the sparse model SfM builds from it:
 
-Top row: input keyframes and stills, SfM sparse points with cameras, dense point cloud. Bottom row: mesh geometry after plane snapping and gap filling, the textured model, the report page.
+![Input keyframes and stills, SfM sparse points and cameras](results/hotel1/inputs.png)
 
-### SfM walkthrough
+Left: some of the input video keyframes and reference stills. Right: the SfM sparse points with every registered camera in an oblique view; blue dots are video keyframes (camera 1), orange dots the stills (camera 2), arrows the viewing directions.
 
-![SfM camera path](results/hotel1/path.png)
+#### Camera path
 
-The camera path of the video (camera 1, 320 cameras) seen from above, the sparse points in grey. Numbered circles mark equal time steps along the walk (the table on the right gives the elapsed seconds), black arrowheads the walking direction, thin red arrows the viewing direction of every few cameras, orange squares the stills. The walk starts at the left end of the room (waypoint 1), turns on the spot for about 19 s (waypoints 1 to 5), goes along the lower wall to the middle (6), circles through the middle of the room (7 to 9), and ends with a loop on the right (10 to 12). The path has no jumps: the global mapper cut it into pieces on this capture, so the stage re-mapped it with the incremental mapper (`sfm.mapper.retry_on_jumps`).
+How the walk through the room went, seen from above:
 
-![Details](results/hotel1/details.png)
+![SfM camera path](results/hotel1/sfm_path.png)
 
-Left of each pair a keyframe, right the model rendered from the same camera pose (the poses line up; the remaining holes show what is still missing), then the mono depth fit, the SfM track lengths and the SfM reprojection error.
+The camera path of the video (camera 1, 320 cameras), the sparse points in grey. Numbered circles mark equal time steps along the walk (the table on the right gives the elapsed seconds), black arrowheads the walking direction, thin red arrows the viewing direction of every few cameras, orange squares the stills. The walk starts at the left end of the room (waypoint 1), turns on the spot for about 19 s (waypoints 1 to 5), goes along the lower wall to the middle (6), circles through the middle of the room (7 to 9), and ends with a loop on the right (10 to 12). The path has no jumps: the global mapper cut it into pieces on this capture, so the stage re-mapped it with the incremental mapper (`sfm.mapper.retry_on_jumps`).
+
+### Dense step and after: OpenMVS vs 2DGS
+
+From here on the two backends differ.
+
+| Stage | OpenMVS | 2DGS |
+|---|---|---|
+| `dense` | 5458 s (91 min): 11.6 M dense points, mesh 4.1 M faces, 2.4 M after refine | about 5040 s (84 min): 500 k Gaussians trained for 24k iterations at 960 px (81 min, 1.5 GB VRAM), TSDF mesh 352 k faces |
+| `mesh_post` | 699 s: 2.0 M faces in 136 pieces, wall RMS 0.03 % of the diagonal | 66 s: 352 k faces in 1 piece, wall RMS 0.20 % of the diagonal |
+| `export` | 100 s: `model.glb` 156 MB | 17 s: `model.glb` 57 MB, `splats.ply` |
+| total | 7289 s (2.0 h) | about 6150 s (1.7 h) |
+| surface missing, raw mesh (`hole_share_raw`) | 61 % | 0.8 % |
+| surface missing, final mesh (`hole_share_final`) | 6.4 % | 0.7 % |
+| held-out photos, splat render | – | PSNR 31.6 dB, SSIM 0.95 |
+
+Hole share: the share of the surface the keyframes see (mono depth of 24 views) that the mesh does not cover; the report computes it for every run. Measured against the OpenMVS dense points instead, which favours OpenMVS, the final meshes miss 3.6 % and 1.8 %. The 2DGS dense step ran as 4 resumed chunks (`dense.gs.max_minutes`); its time is their sum. OpenMVS `dense` finished in 91 min on the OpenMVS `develop` build (the 2.1 build needed about 2.4 times as long for densify alone).
+
+#### OpenMVS results
+
+The OpenMVS outputs from above the room:
+
+![OpenMVS: dense point cloud, mesh, textured model](results/hotel1/openmvs.png)
+
+Left to right: the dense point cloud, the mesh after plane snapping and gap filling, the textured model. The mesh keeps fine detail but has holes where nothing was seen well (floor beside the bed, behind furniture, plain walls), even after the gap filling from mono depth.
+
+#### 2DGS results
+
+The 2DGS outputs, from a held-out camera and from above the room:
+
+![2DGS: held-out photo and splat render, mesh, textured model](results/hotel1/2dgs.png)
+
+Left to right: a photo held out of the training next to the splat render from its pose, the mesh after plane snapping, the textured model. The mesh is closed almost everywhere; it is smoother, with less fine detail and a few thin floaters near the walls. The light grey patches on the floor of the textured model are mesh faces that no input photo sees clearly (for example beside and under the bed), so texturing has no colour for them and fills them flat; the surface is there, it is just not coloured.
+
+#### Side by side at held-out cameras (with the real photo)
+
+Accuracy against ground truth: real camera poses from the walk whose photos were kept out of the 2DGS training, so each render can be compared with what the camera actually saw.
+
+![Held-out cameras: photo, OpenMVS mesh, 2DGS mesh, 2DGS splats](results/hotel1/backends_heldout.png)
+
+One row per held-out camera; columns: the photo, the OpenMVS textured mesh and the 2DGS textured mesh from the same pose (white: no surface), the 2DGS splat render. OpenMVS leaves holes on the wall, window and curtain; 2DGS covers them. OpenMVS did use these photos (only 2DGS held them out), so this comparison slightly favours OpenMVS. These poses are at eye level on the walked path, where every method looks its best.
+
+#### Side by side at novel views (no photo exists)
+
+Completeness from new angles: viewpoints no camera ever took, as when flying around the model.
+
+![Novel views: OpenMVS mesh, 2DGS mesh, 2DGS splats](results/hotel1/backends_novel.png)
+
+One row per viewpoint, along the walk lifted by 10 % of the room height and pitched down 10 degrees; columns: OpenMVS textured mesh, 2DGS textured mesh, 2DGS splat render. Surfaces that were only seen at grazing angles or partly hidden now face the viewer, so the OpenMVS holes are larger here than at the held-out cameras, while 2DGS stays closed.
+
+#### Unseen area in the real-time viewer
+
+What the splats show where no camera looked:
+
+![2DGS splats in the viewer, floor behind the bed](results/hotel1/viewer_unseen.jpg)
+
+The 2DGS splats in the real-time viewer (`view-splats`) from a viewpoint the walk never took. The floor behind and beside the bed, which no camera saw clearly, is filled in with carpet continuing from the visible floor, where the OpenMVS mesh has a hole. It is a plausible fill, not a measurement, and blurrier than the observed surfaces.
+
+All figures of this section and the top image are made with `pixi run -e gsplat python scripts/make_readme_figures.py --backends RUN_OPENMVS RUN_2DGS` (from the two runs' outputs and report panels); `scripts/compare_dense.py` writes the full comparison page (timings, hole masks, geometry, textured PSNR).
 
 ## Tests
 
@@ -169,3 +240,5 @@ pixi run test    # one test file per stage, on a short test clip (scripts/make_t
 Small standalone scripts: `pixi run 1a_projection` (projection), `1b_epipolar` (essential/fundamental matrix, epipolar lines), `1c_two_view_geometry` (matching, relative pose, triangulation). Their plots are written to `results/tutorial_*.png`; `pixi run python scripts/make_readme_figures.py --tutorials` joins the epipolar and feature-match plots into the figure below.
 
 ![Tutorials: epipolar geometry and feature matches](results/tutorials.png)
+
+Top: epipolar geometry of two views (1b). Bottom: feature matches between two images (1c).
