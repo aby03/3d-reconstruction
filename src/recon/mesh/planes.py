@@ -102,7 +102,7 @@ def _offset_peaks(offsets: np.ndarray, area: np.ndarray, tau: float, min_area: f
     lo = offsets.min()
     idx = ((offsets - lo) / width).astype(int)
     hist = np.bincount(idx, area)
-    window = np.convolve(hist, np.ones(5), mode="same")  # ±2 bins = ±tau
+    window = np.convolve(hist, np.ones(5))[2 : 2 + len(hist)]  # ±2 bins = ±tau, same length as hist
     peaks, free = [], np.ones(len(hist), bool)
     while True:
         peak = int(np.argmax(np.where(free, window, -1)))
