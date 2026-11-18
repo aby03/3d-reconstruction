@@ -153,7 +153,8 @@ def run_mesh_post(
     t0 = time.perf_counter()
     consistency: dict[str, Any] = {"enabled": False}
     fits = dense_dir / s05_dense.MONO_ARTIFACTS["mono_fit"]
-    if options.consistency.enabled and fits.is_file():
+    # a 2DGS mesh is already fused from all views; carving it against mono depth only opens holes
+    if options.consistency.enabled and fits.is_file() and dense.get("dense_backend") != "2dgs":
         c = options.consistency
         views = s05_dense.load_mono_views(dense_dir, pd.read_csv(fits), c.min_inlier_ratio, c.max_residual)
         consistency = {

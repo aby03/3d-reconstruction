@@ -296,7 +296,7 @@ mesh_post:                       # step 6: clean, fill small holes, flatten plan
   holes:                         # close boundary loops up to a size (the outer boundary stays open)
     small_hole_max_edges: 1000   # hotel1: 100 left 113 holes open, 1000 leaves 1
     max_loop_perimeter_frac: 0.3 # loops longer than this fraction of the bbox perimeter are the outer boundary
-  consistency:                   # remove unsupported faces that keyframes see through (mesh depth vs fitted mono depth, Open3D ray casting), after hole filling
+  consistency:                   # remove unsupported faces that keyframes see through (mesh depth vs fitted mono depth, Open3D ray casting), after hole filling; skipped under dense.backend: 2dgs
     enabled: true
     pixel_stride: 2              # every n-th pixel of each mono depth map is a ray
     free_rel: 0.1                # the mesh counts as in free space where nearer than the view depth by this fraction of it ...
