@@ -19,6 +19,7 @@ from recon.io.ply import read_openmvs_points
 
 C0 = 0.28209479177387814  # SH band-0 constant
 LOG_EVERY = 100  # train_log.csv row every n iterations (and the last one)
+CKPT_EVERY = 1000  # training checkpoint every n iterations (a killed run loses at most these)
 SH_EVERY = 1000  # one more SH degree every n iterations
 DIST_FROM = 0.10  # distortion loss from this share of the iterations
 NORMAL_FROM = 0.25  # normal consistency loss from this share
@@ -105,6 +106,14 @@ class Splats:
         sh = torch.cat([col("f_dc_0", "f_dc_1", "f_dc_2")[:, None], rest], 1)
         return cls(col("x", "y", "z"), col(*[f"rot_{i}" for i in range(4)]), col("scale_0", "scale_1"),
                    col("opacity")[:, 0], sh)
+
+    @classmethod
+    def from_params(cls, p: dict[str, Any]) -> Splats:
+        """From the training's raw parameters (means, quats, scales (N,3), opacities, sh0, shN)."""
+        import torch
+
+        sh = torch.cat([p["sh0"], p["shN"]], 1)
+        return cls(p["means"], p["quats"], p["scales"][:, :2].contiguous(), p["opacities"], sh)
 
     def save_ckpt(self, path: Path) -> Path:
         """Exact torch checkpoint."""
@@ -256,11 +265,34 @@ def _init_params(xyz: np.ndarray, rgb: np.ndarray, sh_degree: int, scene_scale: 
     }
 
 
+def _save_state(path: Path, state: dict[str, Any]) -> None:
+    """torch.save to `path` through a temporary file (a kill mid-write keeps the previous checkpoint)."""
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    tmp.replace(path)
+
+
+def _trim_log(log_csv: Path, step: int) -> None:
+    """Drop the rows of `log_csv` from `step` on (logged after the checkpoint a resumed run starts from)."""
+    with log_csv.open(newline="") as f:
+        rows = list(csv.reader(f))
+    with log_csv.open("w", newline="") as f:
+        csv.writer(f).writerows([rows[0], *(r for r in rows[1:] if int(r[0]) < step)])
+
+
 def train(
     views: list[View], init: tuple[np.ndarray, np.ndarray], mono: dict[str, tuple[np.ndarray, np.ndarray]],
-    options: GsOptions, device: str, log_csv: Path, seed: int = 0,
-) -> Splats:
-    """Train on the non-held-out views with MCMC up to `max_gaussians`; LOG_COLUMNS rows to `log_csv`."""
+    options: GsOptions, device: str, log_csv: Path, seed: int = 0, ckpt: Path | None = None,
+    stop_after: int | None = None,
+) -> tuple[Splats, dict[str, Any]]:
+    """Train on the non-held-out views with MCMC up to `max_gaussians`; LOG_COLUMNS rows to `log_csv`.
+
+    With `ckpt`: continue from it when it exists (params, optimizer, strategy and RNG states, step), save it every
+    CKPT_EVERY iterations and at the end. Stops early after `options.max_minutes` or `stop_after` iterations of
+    this call. Returns the splats and {step, finished, resumed_from, elapsed_s} (elapsed over all calls)."""
     import torch
     from gsplat.strategy import MCMCStrategy
 
@@ -272,7 +304,13 @@ def train(
     diag = float(np.linalg.norm(hi - lo))
     centers = np.array([-v.viewmat[:3, :3].T @ v.viewmat[:3, 3] for v in views])
     scene_scale = max(1.1 * float(np.linalg.norm(centers - centers.mean(0), axis=1).max()), 0.05 * diag)
-    init_params = _init_params(xyz, rgb, options.sh_degree, scene_scale, diag, seed)
+    saved = torch.load(ckpt, map_location="cpu", weights_only=False) if ckpt is not None and ckpt.is_file() else None
+    if saved is not None and "optimizers" not in saved:
+        raise ValueError(f"{ckpt}: a finished training's checkpoint (no optimizer states)")
+    if saved is not None:
+        init_params = {k: (v, LR[k]) for k, v in saved["params"].items()}
+    else:
+        init_params = _init_params(xyz, rgb, options.sh_degree, scene_scale, diag, seed)
     splats = torch.nn.ParameterDict({k: torch.nn.Parameter(v.to(device)) for k, (v, _) in init_params.items()})
     opts = {k: torch.optim.Adam([{"params": splats[k], "lr": lr, "name": k}], eps=1e-15)
             for k, (_, lr) in init_params.items()}
@@ -281,6 +319,17 @@ def train(
     strategy = MCMCStrategy(cap_max=options.max_gaussians, refine_start_iter=REFINE_START,
                             refine_stop_iter=int(REFINE_STOP * iters), refine_every=REFINE_EVERY)
     state = strategy.initialize_state()
+    start, elapsed0 = 0, 0.0
+    if saved is not None:
+        for k, o in opts.items():
+            o.load_state_dict(saved["optimizers"][k])
+        sched.load_state_dict(saved["scheduler"])
+        state = saved["strategy"]
+        rng.bit_generator.state = saved["rng"]["numpy"]
+        torch.set_rng_state(saved["rng"]["torch"])
+        if saved["rng"]["cuda"] is not None and torch.device(device).type == "cuda":
+            torch.cuda.set_rng_state(saved["rng"]["cuda"], torch.device(device))
+        start, elapsed0 = saved["step"], saved["elapsed_s"]
     strategy.check_sanity(splats, opts)
     dist_from, normal_from = int(DIST_FROM * iters), int(NORMAL_FROM * iters)
     use_dist = options.lambda_distortion > 0
@@ -289,11 +338,33 @@ def train(
         torch.cuda.reset_peak_memory_stats(device)
     log_csv.parent.mkdir(parents=True, exist_ok=True)
     zero = torch.zeros((), device=device)
-    with log_csv.open("w", newline="") as f:
+    resume_log = start > 0 and log_csv.is_file()
+    if resume_log:
+        _trim_log(log_csv, start)
+    t0 = time.perf_counter()
+    deadline = t0 + 60 * options.max_minutes if options.max_minutes is not None else None
+    end = iters if stop_after is None else min(iters, start + stop_after)
+
+    def checkpoint(step: int, finished: bool) -> None:
+        if ckpt is None:
+            return
+        data: dict[str, Any] = {"params": {k: t.detach().cpu() for k, t in splats.items()}, "step": step,
+                                "elapsed_s": elapsed0 + time.perf_counter() - t0}
+        if not finished:  # what continuing needs; a finished training keeps only its parameters
+            data |= {
+                "optimizers": {k: o.state_dict() for k, o in opts.items()}, "scheduler": sched.state_dict(),
+                "strategy": state,
+                "rng": {"numpy": rng.bit_generator.state, "torch": torch.get_rng_state(),
+                        "cuda": torch.cuda.get_rng_state(torch.device(device)) if cuda else None},
+            }
+        _save_state(ckpt, data)
+
+    step = start
+    with log_csv.open("a" if resume_log else "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(LOG_COLUMNS)
-        t0 = time.perf_counter()
-        for step in range(iters):
+        if not resume_log:
+            writer.writerow(LOG_COLUMNS)
+        while step < end and (deadline is None or time.perf_counter() < deadline):
             v = train_views[rng.integers(len(train_views))]
             w, h = v.size
             K, T = (torch.from_numpy(a).to(device) for a in (v.K, v.viewmat))
@@ -328,9 +399,15 @@ def train(
                 psnr = -10 * torch.log10(((colors.detach() - gt) ** 2).mean())
                 vram = torch.cuda.max_memory_allocated(device) / 2**20 if cuda else 0.0
                 writer.writerow([step, *(f"{float(x.detach()):.6g}" for x in (loss, l1, s, l_dist, l_normal, l_mono)),
-                                 len(splats["means"]), f"{float(psnr):.4f}", f"{time.perf_counter() - t0:.3f}",
-                                 f"{vram:.0f}"])
+                                 len(splats["means"]), f"{float(psnr):.4f}",
+                                 f"{elapsed0 + time.perf_counter() - t0:.3f}", f"{vram:.0f}"])
                 f.flush()
+            step += 1
+            if step % CKPT_EVERY == 0 and step < iters:
+                checkpoint(step, False)
+    finished = step >= iters
+    checkpoint(step, finished)
     p = {k: t.detach().cpu() for k, t in splats.items()}
-    return Splats(p["means"], p["quats"], p["scales"][:, :2].contiguous(), p["opacities"],
-                  torch.cat([p["sh0"], p["shN"]], 1))
+    info = {"step": step, "finished": finished, "resumed_from": start if saved is not None else None,
+            "elapsed_s": elapsed0 + time.perf_counter() - t0}
+    return Splats.from_params(p), info

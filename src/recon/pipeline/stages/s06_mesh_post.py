@@ -280,6 +280,7 @@ def run_mesh_post(
     report: dict[str, Any] = {
         "input": f"{s05_dense.DIR_NAME}/{src_rel}",
         "input_faces": merge.get("input_faces", cleaned.before["faces"]),
+        "dense_backend": dense.get("dense_backend", "openmvs"),
         "units": dense["units"],
         "diag": dense["diag"],
         "merge": merge,

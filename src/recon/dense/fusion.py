@@ -36,7 +36,7 @@ class FusionView:
     cam_from_world: np.ndarray  # (4, 4)
 
 
-def _backproject(view: FusionView, stride: int, max_depth: float) -> np.ndarray:
+def backproject(view: FusionView, stride: int, max_depth: float) -> np.ndarray:
     h, w = view.depth.shape
     v, u = np.mgrid[0:h:stride, 0:w:stride]
     z = view.depth[v, u]
@@ -84,7 +84,7 @@ def fuse(
             skipped += 1
             continue
         grid.integrate(coords, depth, color, K, K, T, 1.0, max_depth, multiplier)
-        cloud.append(_backproject(view, options.point_stride, max_depth))
+        cloud.append(backproject(view, options.point_stride, max_depth))
     if skipped:
         log.warning("fusion: skipped %d of %d views with no valid depth", skipped, len(views))
     if cloud:

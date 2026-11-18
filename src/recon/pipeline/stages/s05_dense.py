@@ -1,5 +1,5 @@
-"""Step 5: undistort the aligned model, densify it with OpenMVS, mesh, refine and preview-texture the mesh, in
-world W, in `05_dense/`."""
+"""Step 5: undistort the aligned model, densify it with OpenMVS, mesh, refine and preview-texture the mesh (or,
+with `dense.backend: 2dgs`, train 2D Gaussian splats and mesh their depth: `s05_gs`), in world W, in `05_dense/`."""
 
 import dataclasses
 import hashlib
@@ -102,6 +102,10 @@ MONO_ARTIFACTS = {
     "plot_mono_fit": "reports/plots/mono_fit.png",
     "plot_mono_example": "reports/plots/mono_example.png",
 }
+GS_DIR = "gs"  # backend 2dgs: the training outputs, kept for a re-run whose training inputs are unchanged
+GS_CACHE = f"{GS_DIR}/cache.json"
+GS_ARTIFACTS = {"splats": f"{GS_DIR}/splats.ply", "train_log": f"{GS_DIR}/train_log.csv", "holdout": f"{GS_DIR}/holdout.json"}
+OPENMVS_ONLY = ("scene_dense_points", "mesh_openmvs")  # ARTIFACTS that backend 2dgs does not write
 PREVIEW_DIR = "preview"
 MONO_COLUMNS = ["image", "points", "inliers", "inlier_ratio", "median_rel_residual", "median_rel_residual_all",
                 "scale", "shift", "fitted", "reason", "mesh_used", "mesh_pixels_frac", "mesh_median_rel_residual"]
@@ -344,13 +348,42 @@ def _run_simplerecon(
     return summary, rows
 
 
+def good_fits(fits: pd.DataFrame, min_inlier_ratio: float, max_residual: float) -> pd.DataFrame:
+    """The rows of `fits` (`mono_fit.csv`) whose mono depth fits the SfM points well."""
+    return fits[fits["fitted"] & (fits["inlier_ratio"] >= min_inlier_ratio) & (fits["median_rel_residual"] <= max_residual)]
+
+
+def quality_warnings(
+    mono_report: dict[str, Any], options: MonoOptions, dense_stats: dict[str, Any], meshes: list[tuple[str, dict[str, Any]]]
+) -> list[str]:
+    """Warnings on the depth fits, the share of the cloud and `meshes` inside the sparse bbox and their components."""
+    warnings = []
+    if mono_report["enabled"]:
+        label = f"{mono_report['source']} depth"
+        warnings += [f"{label}: {n} not fitted: {why}" for n, why in mono_report["skipped"].items()]
+        worst = (mono_report["median_rel_residual"] or {}).get("max", 0.0)
+        if worst > options.max_median_residual:
+            warnings.append(f"{label}: a view has median relative residual {worst:.1%} (> {options.max_median_residual:.0%})")
+    for name, stats in [("dense cloud", dense_stats), *meshes]:
+        frac = stats["inside_sparse_bbox_frac"]
+        if frac < MIN_INSIDE_FRAC:
+            warnings.append(f"{name}: {frac:.1%} of the vertices inside the sparse bbox (< {MIN_INSIDE_FRAC:.0%})")
+    for name, stats in meshes:
+        if stats["largest_component_frac"] < MIN_LARGEST_COMPONENT_FRAC:
+            warnings.append(
+                f"{name}: largest component has {stats['largest_component_frac']:.1%} of the faces"
+                f" ({stats['components']} components)"
+            )
+    return warnings
+
+
 def load_mono_views(
     dense_dir: Path, fits: pd.DataFrame, min_inlier_ratio: float, max_residual: float
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """(depth, K, cam_from_world) of every view of the dense stage dir `dense_dir` whose mono depth fits the SfM
     points well (`fits`: rows of `mono_fit.csv`): the depth with the unconfident pixels at 0, the intrinsics at
     the depth map's size, the 4x4 pose."""
-    good = fits[fits["fitted"] & (fits["inlier_ratio"] >= min_inlier_ratio) & (fits["median_rel_residual"] <= max_residual)]
+    good = good_fits(fits, min_inlier_ratio, max_residual)
     rec = pycolmap.Reconstruction(dense_dir / ARTIFACTS["undistorted_model"])
     by_name = {im.name: im for im in rec.images.values()}
     views = []
@@ -693,11 +726,13 @@ def run_dense(
     gpu_index: int = 0,
     cpu_fallback: bool = False,
     hardware: str | None = None,
+    seed: int = 0,
 ) -> StageOutput:
     """Run step 5 on the aligned model of the align stage dir `align_dir` (images from the sfm stage dir
     `sfm_dir`), writing into the stage dir `out`; the OpenMVS tools run through `runner`. `cpu_fallback`: a
     CUDA tool that runs out of memory (after the lower-resolution retry for densify) runs again on the CPU;
-    `hardware` (the config's preset name) only goes into the report."""
+    `hardware` (the config's preset name) only goes into the report; `seed` (`run.seed`) seeds backend 2dgs
+    when `gs.seed` is unset."""
     options = options or DenseOptions()
     if options.backend == "2dgs" and importlib.util.find_spec("gsplat") is None:
         raise ConfigError("dense.backend: 2dgs needs gsplat; run it in its env: pixi run -e gsplat recon ...")
@@ -716,6 +751,11 @@ def run_dense(
     diag = float(np.linalg.norm(hi - lo))
     units = read_json(align_dir / s04_align.ARTIFACTS["transform"])["units"]
     timings["load"] = time.perf_counter() - t0
+    if options.backend == "2dgs":
+        from recon.pipeline.stages.s05_gs import run_gs
+
+        return run_gs(align_dir, sfm_dir, out, options, runner, backend, names, centres, box, diag, units, timings,
+                      options.gs.seed if options.gs.seed is not None else seed, hardware)
 
     undistorted_dir = out / ARTIFACTS["undistorted"]
     work_dir = out / WORK_DIR
@@ -787,23 +827,8 @@ def run_dense(
         warnings.append(f"{DENSIFY} logged {dense.num_points} points, {dense.ply.name} has {num_raw_points}")
     retries = [r for result in (dense, mesh, refined, preview) if result is not None for r in result.oom_retries]
     warnings += [retry_warning(r) for r in retries]
-    if mono_report["enabled"]:
-        label = f"{mono_report['source']} depth"
-        warnings += [f"{label}: {n} not fitted: {why}" for n, why in mono_report["skipped"].items()]
-        worst = (mono_report["median_rel_residual"] or {}).get("max", 0.0)
-        if worst > options.mono.max_median_residual:
-            warnings.append(f"{label}: a view has median relative residual {worst:.1%} (> {options.mono.max_median_residual:.0%})")
     meshes = [("raw mesh", mesh_raw)] + ([("refined mesh", mesh_refined)] if ran else [])
-    for name, stats in [("dense cloud", dense_stats), *meshes]:
-        frac = stats["inside_sparse_bbox_frac"]
-        if frac < MIN_INSIDE_FRAC:
-            warnings.append(f"{name}: {frac:.1%} of the vertices inside the sparse bbox (< {MIN_INSIDE_FRAC:.0%})")
-    for name, stats in meshes:
-        if stats["largest_component_frac"] < MIN_LARGEST_COMPONENT_FRAC:
-            warnings.append(
-                f"{name}: largest component has {stats['largest_component_frac']:.1%} of the faces"
-                f" ({stats['components']} components)"
-            )
+    warnings += quality_warnings(mono_report, options.mono, dense_stats, meshes)
     for warning in warnings:
         log.warning(warning)
 
@@ -905,16 +930,19 @@ class DenseStage(Stage):
     config_section = "dense"
 
     def hash_inputs(self) -> dict[str, Any]:
-        return {"device": self.ctx.config.device}
+        seed = {"seed": self.ctx.config.run.seed} if self.options.backend == "2dgs" else {}
+        return {"device": self.ctx.config.device, **seed}
 
     def prepare(self) -> None:
-        """Keep the OpenMVS steps' outputs of an earlier run (`run_dense` reuses them when their inputs are unchanged
-        and clears them otherwise); the rest is removed."""
+        """Keep the outputs of an earlier run's OpenMVS steps, or under backend 2dgs its training (`run_dense`
+        reuses them when their inputs are unchanged and clears them otherwise); the rest is removed, so nothing
+        of the other backend is left."""
         out = self.out
-        if not (out / CHAIN_FILE).is_file():
+        keep, marker = ([GS_DIR], GS_CACHE) if self.options.backend == "2dgs" else (CHAIN_KEEP, CHAIN_FILE)
+        if not (out / marker).is_file():
             return super().prepare()
         for path in out.iterdir():
-            if path.name not in CHAIN_KEEP:
+            if path.name not in keep:
                 shutil.rmtree(path) if path.is_dir() else path.unlink()
 
     def run(self) -> StageOutput:
@@ -930,7 +958,10 @@ class DenseStage(Stage):
             device.gpu_index,
             cpu_fallback=device.preference == "auto",
             hardware=self.ctx.hardware,
+            seed=self.ctx.config.run.seed,
         )
 
     def expected_artifacts(self) -> list[Path]:
+        if self.options.backend == "2dgs":
+            return [self.out / rel for k, rel in (ARTIFACTS | GS_ARTIFACTS).items() if k not in OPENMVS_ONLY]
         return [self.out / rel for rel in ARTIFACTS.values()]

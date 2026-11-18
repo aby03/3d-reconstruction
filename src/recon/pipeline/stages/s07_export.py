@@ -49,6 +49,7 @@ ARTIFACTS = {
     "intrinsics": "cameras/intrinsics.json",
     "metadata": "metadata.json",
 }
+OPTIONAL_ARTIFACTS = {"splats": "splats/splats.ply"}  # dense.backend 2dgs: the 3DGS-layout Gaussians
 WORLD = {"up": "+Z", "gravity": [0.0, 0.0, -1.0], "floor_z": 0.0}
 
 
@@ -140,6 +141,10 @@ def run_export(
     t0 = time.perf_counter()
     _copy(align_dir / s04_align.ARTIFACTS["points"], out / ARTIFACTS["sparse_ply"])
     _copy(dense_dir / s05_dense.ARTIFACTS["dense_points"], out / ARTIFACTS["dense_ply"])
+    artifacts = dict(ARTIFACTS)
+    if (splats := dense_dir / s05_dense.GS_ARTIFACTS["splats"]).is_file():
+        artifacts["splats"] = OPTIONAL_ARTIFACTS["splats"]
+        _copy(splats, out / artifacts["splats"])
     timings["point_clouds"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -162,8 +167,9 @@ def run_export(
     }
     if preview_info:
         files[ARTIFACTS["glb_preview"]] = file_entry(out / ARTIFACTS["glb_preview"], "+Y", preview_info)
-    for key in ("sparse_ply", "dense_ply", "transforms"):
-        files[ARTIFACTS[key]] = file_entry(out / ARTIFACTS[key], "+Z")
+    for key in ("sparse_ply", "dense_ply", "transforms", "splats"):
+        if key in artifacts:
+            files[artifacts[key]] = file_entry(out / artifacts[key], "+Z")
     for key in ("colmap", "colmap_undistorted", "trajectory"):
         files |= _dir_entries(out, ARTIFACTS[key], "+Z")
     files[ARTIFACTS["intrinsics"]] = file_entry(out / ARTIFACTS["intrinsics"])
@@ -193,7 +199,7 @@ def run_export(
         ", ".join(f"{k} {v:.1f} s" for k, v in timings.items()),
     )
     return StageOutput(
-        artifacts=dict(ARTIFACTS),
+        artifacts=artifacts,
         metrics={
             "glb_mb": round(glb_info["bytes"] / 2**20, 1),
             "glb_faces": glb_info["faces"],

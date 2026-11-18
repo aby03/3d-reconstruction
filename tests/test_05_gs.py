@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pycolmap
 import pytest
+from conftest import assert_stage_ok, cli, rerun_copy
 
 pytest.importorskip("gsplat")
 torch = pytest.importorskip("torch")
@@ -11,6 +12,7 @@ torch = pytest.importorskip("torch")
 from recon.dense.gs_render import fuse_mesh, holdout_metrics, novel_path, render_path, splat_points
 from recon.dense.gs_train import LOG_COLUMNS, Splats, init_points, load_mono_depth, load_views, train
 from recon.io.ply import read_openmvs_points, write_points
+from recon.io.tables import read_json
 from recon.mesh.qa import tau as geometry_tau
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="gsplat needs CUDA")
@@ -31,14 +33,15 @@ def trained(smoke_run, tmp_path_factory):
     assert len(xyz) == len(rgb) <= options.max_gaussians and rgb.dtype == np.uint8
     out = tmp_path_factory.mktemp("gs")
     t0 = time.perf_counter()
-    splats = train(views, (xyz, rgb), mono, options, "cuda", out / "train_log.csv", seed=0)
+    splats, info = train(views, (xyz, rgb), mono, options, "cuda", out / "train_log.csv", seed=0)
+    assert info == {"step": options.iterations, "finished": True, "resumed_from": None, "elapsed_s": info["elapsed_s"]}
     print(f"train {options.iterations} it: {time.perf_counter() - t0:.2f} s, {len(splats)} Gaussians")
-    return rec, views, splats, out
+    return rec, views, splats, out, (xyz, rgb), mono
 
 
 def test_gs_train(smoke_run, trained):
     options = smoke_run.config.dense.gs
-    _, _, splats, out = trained
+    _, _, splats, out, _, _ = trained
     log = pd.read_csv(out / "train_log.csv")
     assert list(log.columns) == LOG_COLUMNS and len(log) >= 1 and log["iter"].iloc[-1] == options.iterations - 1
     assert np.isfinite(log["loss"]).all() and 0 < len(splats) <= options.max_gaussians
@@ -50,9 +53,28 @@ def test_gs_train(smoke_run, trained):
     assert torch.equal(ckpt.sh, splats.sh) and back.sh_degree == options.sh_degree
 
 
+def test_gs_resume(smoke_run, trained, tmp_path):
+    """Stopped after 20 iterations and continued from the checkpoint, the training reaches the full schedule."""
+    options = smoke_run.config.dense.gs
+    _, views, _, _, init, mono = trained
+    t0 = time.perf_counter()
+    log, ckpt = tmp_path / "train_log.csv", tmp_path / "ckpt.pt"
+    _, first = train(views, init, mono, options, "cuda", log, seed=0, ckpt=ckpt, stop_after=20)
+    assert first["step"] == 20 and not first["finished"] and first["resumed_from"] is None
+    assert "optimizers" in torch.load(ckpt, weights_only=False)
+    splats, second = train(views, init, mono, options, "cuda", log, seed=0, ckpt=ckpt)
+    assert second["step"] == options.iterations and second["finished"] and second["resumed_from"] == 20
+    assert second["elapsed_s"] >= first["elapsed_s"] and 0 < len(splats) <= options.max_gaussians
+    saved = torch.load(ckpt, weights_only=False)
+    assert saved["step"] == options.iterations and "optimizers" not in saved
+    iters = pd.read_csv(log)["iter"]
+    assert iters.is_monotonic_increasing and iters.iloc[-1] == options.iterations - 1 and (iters < 20).any()
+    print(f"resume test {time.perf_counter() - t0:.2f} s")
+
+
 def test_gs_render(smoke_run, trained):
     gs, fusion = smoke_run.config.dense.gs, smoke_run.config.dense.fusion
-    rec, views, splats, out = trained
+    rec, views, splats, out, _, _ = trained
     t0 = time.perf_counter()
     metrics = holdout_metrics(splats, views)
     assert metrics["per_view"] and np.isfinite([metrics["psnr"], metrics["ssim"]]).all()
@@ -72,3 +94,45 @@ def test_gs_render(smoke_run, trained):
     files = render_path(splats, path, size, out / "novel_views")
     assert len(files) == gs.novel_views and all(f.stat().st_size > 0 for f in files)
     print(f"render test {time.perf_counter() - t0:.2f} s (fuse {report['fuse_s']} s), {report['faces']} faces")
+
+
+def test_gs_backend(smoke_run, output_root, tmp_path):
+    """The smoke run from dense on with backend 2dgs: stopped at once by max_minutes, continued with --force dense
+    to the end; a re-run that changes only render options then keeps the training."""
+    capture = next(iter(smoke_run.inputs.values()))
+    t0 = time.perf_counter()
+    run = rerun_copy(smoke_run, output_root, tmp_path, "--from", "dense", "--to", "dense",
+                     "--set", "dense.backend=2dgs", "--set", "dense.gs.max_minutes=0")
+    dense = run / "05_dense"
+    stopped = read_json(dense / "reports" / "dense_report.json")
+    assert not stopped["gs"]["finished"] and stopped["gs"]["step"] == 0 and stopped["gs"]["resumed_from"] is None
+    assert any("rerun dense with --force dense" in w for w in stopped["warnings"])
+    t_stopped = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    assert cli(capture, tmp_path, "run", "--resume", run.name, "--force", "dense", "--set", "dense.backend=2dgs") == 0
+    t_first = time.perf_counter() - t0
+    for stage in ("05_dense", "06_mesh_post", "07_export", "08_report"):
+        assert_stage_ok(run / stage)
+    mesh = read_json(run / "06_mesh_post" / "reports" / "mesh_report.json")
+    report = read_json(dense / "reports" / "dense_report.json")
+    assert report["dense_backend"] == "2dgs" and not report["gs"]["reused"] and report["gs"]["num_gaussians"] > 0
+    assert report["gs"]["finished"] and report["gs"]["step"] == report["gs"]["iterations"]
+    assert report["gs"]["resumed_from"] == 0
+    assert report["mesh_raw"]["faces"] > 0 and report["timings"]["train"] > 0
+    # nothing of the OpenMVS run is left for mesh_post to read
+    assert not any((dense / rel).exists() for rel in ("mesh_tsdf.ply", "chain.json", "openmvs/scene_dense.ply"))
+    assert (dense / "openmvs" / "scene_dense.mvs").is_file()
+    assert mesh["dense_backend"] == "2dgs" and not mesh["merge"]["enabled"] and not mesh["fill"]["enabled"]
+    assert mesh["texture"]["faces"] == mesh["final"]["faces"]
+    assert (run / "07_export" / "splats" / "splats.ply").stat().st_size > 0
+    print(f"qa_p95_tau {mesh['qa']['dense_to_mesh']['p95'] / mesh['qa']['tau']:.2f}, {report['num_dense_points']} points")
+
+    t0 = time.perf_counter()
+    assert cli(capture, tmp_path, "run", "--resume", run.name, "--force", "dense", "--to", "dense",
+               "--set", "dense.backend=2dgs", "--set", "dense.gs.novel_views=2", "--set", "report.figures.width=200") == 0
+    again = read_json(dense / "reports" / "dense_report.json")
+    assert again["gs"]["reused"] and again["gs"]["train_s"] == report["gs"]["train_s"]
+    assert again["mesh_raw"]["faces"] == report["mesh_raw"]["faces"]
+    print(f"2dgs dense stopped at once: {t_stopped:.1f} s, continued from dense on: {t_first:.1f} s,"
+          f" again (training reused): {time.perf_counter() - t0:.1f} s")

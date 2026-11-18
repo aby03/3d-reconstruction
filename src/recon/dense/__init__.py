@@ -13,6 +13,7 @@ from recon.dense.undistort import UndistortOptions
 class GsOptions:
     long_side: int = 960
     iterations: int = 7000
+    max_minutes: float | None = None
     max_gaussians: int = 500_000
     holdout_every: int = 8
     sh_degree: int = 3
