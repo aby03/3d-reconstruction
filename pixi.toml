@@ -135,6 +135,12 @@ gxx_linux-64 = "14.*"             # nvcc 12.9 supports GCC <= 14
 
 [feature.gsplat.pypi-dependencies]
 gsplat = "==1.5.3"
+viser = "==0.2.23"                # viewer: the versions gsplat 1.5.3's examples ran with (viser 1.0 came later)
+nerfview = "==0.1.3"
+splines = "==0.3.3"               # imported by nerfview, not in its requirements
+
+[feature.gsplat.tasks]
+view-splats = "python scripts/view_splats.py"
 
 [feature.gsplat.activation.env]
 TORCH_CUDA_ARCH_LIST = "7.5"      # GTX 1660 Ti; keeps the JIT build small

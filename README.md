@@ -104,6 +104,16 @@ Design points worth knowing:
 - `model.glb`: textured, Y up; `model_preview.glb`: the same at 300k faces for a quick look. View it at https://gltf-viewer.donmccurdy.com (opened locally) or in Blender with Material Preview shading.
 - `obj/model.obj` (Z up), `model_vertex_color.ply`, `model.stl`
 - `point_clouds/{sparse,dense}.ply`, `cameras/` (COLMAP model, `transforms.json`), `metadata.json`
+- `splats/splats.ply` (`dense.backend=2dgs` only): the trained Gaussians in the standard 3DGS PLY layout; opens in any 3DGS viewer, e.g. drag it into SuperSplat (https://superspl.at/editor) to share it.
+
+Splat viewer (`dense.backend=2dgs`): a real-time browser viewer rendered on the local GPU (gsplat + viser / nerfview):
+
+```bash
+pixi run -e gsplat view-splats --run outputs/<scene>/runs/<run_id> [--port 8080] [--mesh]  # then open http://localhost:8080
+pixi run -e gsplat view-splats --run outputs/<scene>/runs/<run_id> --check                 # render each mode offscreen, exit
+```
+
+The "Splats" panel switches RGB / depth / normal, sets the resolution scale, depth colour range and background, toggles the input camera frustums (click one, or pick a camera number, to jump to it), plays the novel-view path and, with `--mesh`, toggles `mesh_final_geometry` (decimated to 300k faces) over the splats.
 
 `08_report/figures/` holds `overview.png`, `stages.png`, `path.png` (camera path from above with numbered waypoints) and `details.png`, rendered offscreen from the run (config `report.figures`; no OpenGL window: a warning, the run still succeeds). `08_report/index.html` links them and shows the thresholds (registered ratio, reprojection error, gravity residual, untextured faces, wall RMS, dense-to-mesh p95) with pass/fail.
 

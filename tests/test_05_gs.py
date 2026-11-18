@@ -1,4 +1,11 @@
+import runpy
+import socket
+import subprocess
+import sys
 import time
+import urllib.request
+from unittest import mock
+from pathlib import Path
 
 import av
 import numpy as np
@@ -97,25 +104,34 @@ def test_gs_render(smoke_run, trained):
     print(f"render test {time.perf_counter() - t0:.2f} s (fuse {report['fuse_s']} s), {report['faces']} faces")
 
 
-def test_gs_backend(smoke_run, output_root, tmp_path):
-    """The smoke run from dense on with backend 2dgs: stopped at once by max_minutes, continued with --force dense
-    to the end; a re-run that changes only render options then keeps the training."""
-    capture = next(iter(smoke_run.inputs.values()))
+@pytest.fixture(scope="module")
+def backend_run(smoke_run, output_root, tmp_path_factory):
+    """The smoke run from dense on with backend 2dgs: stopped at once by max_minutes, then continued with
+    --force dense to the end. Returns (run dir, outputs root, stopped dense report, undistorted mtime, timings)."""
+    capture, tmp_path = next(iter(smoke_run.inputs.values())), tmp_path_factory.mktemp("gs_backend")
     t0 = time.perf_counter()
     run = rerun_copy(smoke_run, output_root, tmp_path, "--from", "dense", "--to", "dense",
                      "--set", "dense.backend=2dgs", "--set", "dense.gs.max_minutes=0")
     dense = run / "05_dense"
     stopped = read_json(dense / "reports" / "dense_report.json")
-    assert not stopped["gs"]["finished"] and stopped["gs"]["step"] == 0 and stopped["gs"]["resumed_from"] is None
-    assert any("rerun dense with --force dense" in w for w in stopped["warnings"])
-    assert not stopped["gs"]["prep_reused"]
-    sparse = dense / "undistorted" / "sparse" / "cameras.bin"
-    undistorted_at = sparse.stat().st_mtime_ns
+    undistorted_at = (dense / "undistorted" / "sparse" / "cameras.bin").stat().st_mtime_ns
     t_stopped = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     assert cli(capture, tmp_path, "run", "--resume", run.name, "--force", "dense", "--set", "dense.backend=2dgs") == 0
-    t_first = time.perf_counter() - t0
+    return run, tmp_path, stopped, undistorted_at, (t_stopped, time.perf_counter() - t0)
+
+
+def test_gs_backend(smoke_run, backend_run):
+    """The stopped run warns, the continued one finishes and keeps the prep; a re-run that changes only render
+    options then keeps the training."""
+    capture = next(iter(smoke_run.inputs.values()))
+    run, tmp_path, stopped, undistorted_at, (t_stopped, t_first) = backend_run
+    assert not stopped["gs"]["finished"] and stopped["gs"]["step"] == 0 and stopped["gs"]["resumed_from"] is None
+    assert any("rerun dense with --force dense" in w for w in stopped["warnings"])
+    assert not stopped["gs"]["prep_reused"]
+    dense = run / "05_dense"
+    sparse = dense / "undistorted" / "sparse" / "cameras.bin"
     for stage in ("05_dense", "06_mesh_post", "07_export", "08_report"):
         assert_stage_ok(run / stage)
     mesh = read_json(run / "06_mesh_post" / "reports" / "mesh_report.json")
@@ -151,6 +167,35 @@ def test_gs_backend(smoke_run, output_root, tmp_path):
     assert _frames(dense / "gs" / "novel.mp4") == 2 == len(list((dense / "gs" / "novel").glob("*.jpg")))
     print(f"2dgs dense stopped at once: {t_stopped:.1f} s, continued from dense on: {t_first:.1f} s,"
           f" again (training reused): {time.perf_counter() - t0:.1f} s")
+
+
+def test_view_splats(backend_run, capsys):
+    """The viewer renders every mode offscreen (with the mesh) and its server answers HTTP."""
+    run = backend_run[0]
+    script = Path(__file__).parents[1] / "scripts" / "view_splats.py"
+    t0 = time.perf_counter()
+    with mock.patch.object(sys, "argv", ["view_splats.py", "--run", str(run), "--check", "--mesh"]):
+        runpy.run_path(str(script), run_name="__main__")  # in-process: torch and gsplat are loaded already
+    assert "ok:" in capsys.readouterr().out
+    with socket.socket() as s:
+        s.bind(("localhost", 0))
+        port = s.getsockname()[1]
+    server = subprocess.Popen([sys.executable, script, "--run", run, "--port", str(port)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(60):
+            try:
+                assert urllib.request.urlopen(f"http://localhost:{port}", timeout=1).status == 200
+                break
+            except OSError:
+                assert server.poll() is None, "viewer exited"
+                time.sleep(0.5)
+        else:
+            pytest.fail("viewer did not listen")
+    finally:
+        server.kill()
+        server.wait()
+    print(f"viewer check + serve {time.perf_counter() - t0:.1f} s")
 
 
 def _frames(video) -> int:
