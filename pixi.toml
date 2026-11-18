@@ -127,7 +127,23 @@ antialiased-cnns = "*"
 [feature.lightglue.pypi-dependencies]
 lightglue = { git = "https://github.com/cvg/LightGlue.git", rev = "5a650c444718caffc2669dc0094cde908f42dd73" }  # DISK / SuperPoint + LightGlue for sfm.features.type
 
+# --- gsplat (2D Gaussian splatting): CUDA kernels are JIT-compiled on first import
+[feature.gsplat.dependencies]
+cuda-nvcc = "12.9.*"
+cuda-cudart-dev = "12.9.*"
+gxx_linux-64 = "14.*"             # nvcc 12.9 supports GCC <= 14
+
+[feature.gsplat.pypi-dependencies]
+gsplat = "==1.5.3"
+
+[feature.gsplat.activation.env]
+TORCH_CUDA_ARCH_LIST = "7.5"      # GTX 1660 Ti; keeps the JIT build small
+# conda's CUDA headers / libs are not where torch's extension builder looks (CUDA_HOME/include, CUDA_HOME/lib64)
+CPLUS_INCLUDE_PATH = "${CONDA_PREFIX}/targets/x86_64-linux/include"
+LIBRARY_PATH = "${CONDA_PREFIX}/lib"
+
 [environments]
 build = { features = ["build"], no-default-feature = true }
+gsplat = { features = ["gsplat"] }
 simplerecon = { features = ["simplerecon"] }
 lightglue = { features = ["lightglue"] }
