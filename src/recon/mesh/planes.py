@@ -86,6 +86,8 @@ def _wall_directions(normals: np.ndarray, area: np.ndarray, options: PlaneOption
         free[(peak + np.arange(-2 * half, 2 * half + 1)) % bins] = False
         offset = (azimuth - (peak + 0.5) * AZIMUTH_BIN_DEG + 180) % 360 - 180
         near = np.abs(offset) < tol / 2
+        if area[horizontal][near].sum() <= 0:
+            continue
         angle = (peak + 0.5) * AZIMUTH_BIN_DEG + np.average(offset[near], weights=area[horizontal][near])
         axis = 90 * round(angle / 90)
         if abs(angle - axis) <= options.manhattan_snap_deg:

@@ -1,6 +1,6 @@
 import numpy as np
 
-from recon.mesh.planes import MIN_PAIR_ANGLE_DEG, _axis_angle_deg, _offset_peaks
+from recon.mesh.planes import MIN_PAIR_ANGLE_DEG, PlaneOptions, _axis_angle_deg, _offset_peaks, _wall_directions
 
 
 def test_opposite_normals_are_parallel():
@@ -17,3 +17,10 @@ def test_offset_peak_with_empty_window_is_skipped():
 def test_offset_peak_with_fewer_bins_than_the_window():
     peaks = _offset_peaks(np.array([0.0, 0.6]), np.array([1.0, 1.0]), tau=1.0, min_area=1.0)  # 2 bins
     assert np.allclose(peaks, [0.3])
+
+
+def test_wall_direction_with_empty_window_is_skipped():
+    # one wall face: the first peak bin of the flat window lies tol away, its ±tol/2 window holds no area
+    rad = np.radians(45.0)
+    normals = np.array([[np.cos(rad), np.sin(rad), 0.0]])
+    assert len(_wall_directions(normals, np.array([1.0]), PlaneOptions())) <= 1
